@@ -1,0 +1,12 @@
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/managed_components/
+firmware/dependencies.lock
+test_host/out/
+__pycache__/
+*.pyc
+.pytest_cache/
+tools/.venv/
+*.parquet
+recordings/
