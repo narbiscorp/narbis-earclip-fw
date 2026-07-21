@@ -211,6 +211,9 @@ typedef enum {
     NC_OP_TEST_REPORT       = 0xEA  /* u16 offset -> consolidated report blob chunk */
 } nc_opcode_t;
 
+/* Responses set bit7 (op | NC_OP_RESP_FLAG). TEST-block opcodes (0xE0+)
+ * already carry bit7: their responses echo the opcode UNCHANGED — clients
+ * correlate TEST responses by tid alone. */
 #define NC_OP_RESP_FLAG        0x80
 #define NC_FACTORY_MAGIC       0x4E415242u /* "NARB" */
 
@@ -240,7 +243,8 @@ typedef enum {
  * record = {u16 id, u8 type, u8 flags, i32 min, i32 max, i32 def,
  *           i32 current, u8 name_len, name..., u8 unit_len, unit...}   */
 #define NC_KNOB_DISC_HDR_SIZE  5
-#define NC_KNOB_REC_FIXED      19  /* id..name_len inclusive, excl. strings+unit_len */
+#define NC_KNOB_REC_FIXED      21  /* id(2)+type+flags+min/max/def/current(16)+name_len(1);
+                                      strings + unit_len byte follow */
 
 typedef enum {
     NC_KNOB_BOOL = 0,
