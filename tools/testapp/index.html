@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Narbis Earclip — PCB Verification</title>
+<link rel="stylesheet" href="style.css">
+<!-- No build step, no external resources. Web Bluetooth needs Chrome/Edge
+     on desktop or Android, served from https:// or localhost. file:// works
+     for ?mock=1 only. iOS is unsupported (no Web Bluetooth) — use the
+     python client (tools/narbis_client) there instead. -->
+</head>
+<body>
+
+<header id="hdr">
+  <div class="brand">
+    <span class="dot" id="connDot"></span>
+    Narbis Edge Earclip — PCB Verification
+    <span id="mockBadge" class="badge hidden">MOCK</span>
+  </div>
+  <div id="devInfo" class="devinfo">not connected</div>
+  <div class="hdr-actions">
+    <button id="btnConnect" class="primary">Connect</button>
+    <button id="btnDisconnect" class="hidden">Disconnect</button>
+  </div>
+</header>
+
+<div id="banner" class="banner hidden"></div>
+
+<main>
+  <section id="checklistPane">
+    <div class="pane-head">
+      <h2>Guided test sequence</h2>
+      <div>
+        <button id="btnStart" class="primary" disabled>Start sequence</button>
+      </div>
+    </div>
+    <ol id="checklist"></ol>
+  </section>
+
+  <section id="livePane">
+    <div class="pane-head">
+      <h2 id="liveTitle">Live panel</h2>
+      <button id="btnSkip" class="warn hidden">Skip step</button>
+    </div>
+    <div id="liveInstructions" class="instructions">
+      Connect to a board to begin. The sequence walks every test in order;
+      automatic tests run back-to-back, manual steps prompt you.
+    </div>
+    <div id="liveControls" class="controls"></div>
+    <div id="liveReadout" class="readout"></div>
+    <canvas id="liveCanvas" width="680" height="330"></canvas>
+    <div id="liveLog" class="log"></div>
+  </section>
+</main>
+
+<footer id="reportPane">
+  <div class="pane-head">
+    <h2>Report card</h2>
+    <div>
+      <button id="btnDownload" disabled>Download JSON</button>
+      <button id="btnPrint" disabled>Print</button>
+    </div>
+  </div>
+  <div id="reportMeta" class="report-meta"></div>
+  <table id="reportTable">
+    <thead>
+      <tr><th>#</th><th>Test</th><th>Mode</th><th>Result</th>
+          <th>Value</th><th>Expected</th><th>Note</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</footer>
+
+<script src="proto_consts.js"></script>
+<script src="proto.js"></script>
+<script src="mock.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

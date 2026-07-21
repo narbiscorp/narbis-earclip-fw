@@ -1,0 +1,284 @@
+/* style.css — Narbis PCB-verification bench tool. No frameworks, no fonts
+ * fetched: system stack only (the app must work fully offline). */
+
+:root {
+  --bg: #10151b;
+  --pane: #171e27;
+  --pane2: #1d2632;
+  --ink: #dce6f2;
+  --muted: #8ba0b8;
+  --line: #2a3646;
+  --accent: #4da3ff;
+  --pass: #38c172;
+  --fail: #e3574b;
+  --skip: #b0a24a;
+  --warn: #e0a63c;
+  --ir: #e07840;
+  --red: #e34d6a;
+  --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.45 system-ui, "Segoe UI", Roboto, sans-serif;
+}
+
+/* ---------------- header ---------------- */
+
+#hdr {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 16px;
+  background: var(--pane2);
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+
+.brand { font-weight: 600; white-space: nowrap; }
+
+.dot {
+  display: inline-block;
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  background: #555;
+  margin-right: 6px;
+}
+.dot.on { background: var(--pass); }
+
+.devinfo {
+  flex: 1;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hdr-actions { display: flex; gap: 8px; }
+
+.badge {
+  background: var(--warn);
+  color: #201a05;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 9px;
+  vertical-align: middle;
+}
+
+.banner {
+  padding: 8px 16px;
+  background: #4a3520;
+  color: #ffd9a0;
+  border-bottom: 1px solid #6b4a25;
+}
+.banner.error { background: #46201d; color: #ffb3ab; }
+
+/* ---------------- layout ---------------- */
+
+main {
+  display: grid;
+  grid-template-columns: minmax(330px, 2fr) 3fr;
+  gap: 14px;
+  padding: 14px;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  main { grid-template-columns: 1fr; }
+}
+
+section, footer#reportPane {
+  background: var(--pane);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.pane-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.pane-head h2 { margin: 0; font-size: 15px; }
+
+/* ---------------- buttons / inputs ---------------- */
+
+button {
+  background: var(--pane2);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 14px;
+  font: inherit;
+  cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: 0.45; cursor: default; }
+button.primary { background: #1c4d80; border-color: #2d6db2; }
+button.warn { background: #5a4310; border-color: #8a6a20; }
+button.good { background: #1d5435; border-color: #2f7f52; }
+button.bad { background: #59241f; border-color: #8a382f; }
+
+input[type="number"], input[type="text"] {
+  background: var(--bg);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+  width: 130px;
+}
+
+.hidden { display: none !important; }
+
+/* ---------------- checklist ---------------- */
+
+#checklist { list-style: none; margin: 0; padding: 0; }
+
+#checklist li {
+  display: grid;
+  grid-template-columns: 26px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--line);
+  border-left: 3px solid transparent;
+}
+#checklist li:last-child { border-bottom: none; }
+#checklist li.active { background: var(--pane2); border-left-color: var(--accent); }
+
+.st-ico {
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  background: #2a3646;
+  color: var(--muted);
+}
+.st-ico.running { background: var(--accent); color: #06121f; }
+.st-ico.pass { background: var(--pass); color: #06210f; }
+.st-ico.fail { background: var(--fail); color: #2b0906; }
+.st-ico.skip { background: var(--skip); color: #241f04; }
+
+.st-name { font-size: 13px; }
+.st-name .mode {
+  color: var(--muted);
+  font-size: 11px;
+  margin-left: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.st-val {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  text-align: right;
+}
+.st-val.pass { color: var(--pass); }
+.st-val.fail { color: var(--fail); }
+
+/* ---------------- live panel ---------------- */
+
+.instructions {
+  background: var(--pane2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 9px 12px;
+  min-height: 20px;
+  margin-bottom: 8px;
+}
+.instructions strong { color: var(--warn); }
+
+.controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
+
+.readout {
+  font-family: var(--mono);
+  font-size: 13px;
+  white-space: pre-wrap;
+  margin-bottom: 8px;
+  min-height: 18px;
+}
+.readout .big {
+  font-size: 26px;
+  font-weight: 700;
+}
+.readout .pass { color: var(--pass); }
+.readout .fail { color: var(--fail); }
+
+#liveCanvas {
+  width: 100%;
+  height: auto;
+  background: #0b0f14;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.log {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  max-height: 130px;
+  overflow-y: auto;
+  margin-top: 8px;
+  white-space: pre-wrap;
+}
+
+/* ---------------- report ---------------- */
+
+footer#reportPane { margin: 0 14px 14px; }
+
+.report-meta {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 8px;
+  white-space: pre-wrap;
+}
+
+#reportTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+#reportTable th, #reportTable td {
+  text-align: left;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--line);
+}
+#reportTable th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 12px;
+}
+#reportTable td.r-pass { color: var(--pass); font-weight: 700; }
+#reportTable td.r-fail { color: var(--fail); font-weight: 700; }
+#reportTable td.r-skip { color: var(--skip); font-weight: 700; }
+#reportTable td.val { font-family: var(--mono); font-size: 12px; }
+
+/* ---------------- print: report card only ---------------- */
+
+@media print {
+  body { background: #fff; color: #000; font-size: 12px; }
+  #hdr .hdr-actions, #banner, main, #btnDownload, #btnPrint { display: none !important; }
+  #hdr { position: static; background: #fff; border-bottom: 2px solid #000; }
+  .devinfo { color: #333; }
+  footer#reportPane { border: none; margin: 0; padding: 0; }
+  .report-meta { color: #333; }
+  #reportTable th, #reportTable td { border-bottom: 1px solid #999; }
+  #reportTable td.r-pass { color: #0a7a3c; }
+  #reportTable td.r-fail { color: #b3261e; }
+  #reportTable td.r-skip { color: #7a6c14; }
+}
