@@ -14,6 +14,16 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
+viz = ["matplotlib"]
+data = ["pandas", "pyarrow"]
+
+[project.scripts]
+narbis-record = "narbis_client.recorder:main"
+narbis-plot = "narbis_client.liveplot:main"
+narbis-knobs = "narbis_client.knobs:main"
+narbis-ota = "narbis_client.ota:main"
+narbis-selftest = "narbis_client.selftest:main"
+narbis-timesync = "narbis_client.timesync:main"
 
 [tool.setuptools]
 packages = ["narbis_client"]
