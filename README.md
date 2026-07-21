@@ -28,6 +28,8 @@ tools/
   testapp/                     Web Bluetooth PCB-verification app (see Test mode)
 ```
 
+> **First flash / OTA / recovery:** see [PROGRAMMING.md](PROGRAMMING.md).
+
 ## Building
 
 ```powershell
