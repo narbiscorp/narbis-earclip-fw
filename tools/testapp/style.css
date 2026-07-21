@@ -240,6 +240,29 @@ input[type="number"], input[type="text"] {
 
 footer#reportPane { margin: 0 14px 14px; }
 
+/* ---------------- firmware update (OTA) panel ---------------- */
+
+#otaPane { margin: 0 14px 14px; }
+#otaPane input[type="file"] { font-size: 13px; max-width: 340px; }
+.ota-progress {
+  height: 14px;
+  margin: 10px 0 6px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  overflow: hidden;
+}
+#otaBar {
+  height: 100%;
+  width: 0;
+  background: var(--accent, #3b82f6);
+  transition: width 0.25s ease;
+}
+.ota-text { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.ota-text.error { color: var(--fail); }
+.ota-text.good { color: var(--pass); }
+@media print { #otaPane { display: none !important; } }
+
 .report-meta {
   font-family: var(--mono);
   font-size: 12px;

@@ -54,6 +54,25 @@
   </section>
 </main>
 
+<section id="otaPane">
+  <div class="pane-head">
+    <h2>Firmware update (BLE OTA)</h2>
+    <div>
+      <input type="file" id="otaFile" accept=".bin">
+      <button id="btnFlash" class="primary" disabled>Flash</button>
+    </div>
+  </div>
+  <div class="instructions">
+    Select <code>firmware/build/narbis_earclip.bin</code> (the app image —
+    not a merged factory image) and press Flash. The device verifies a
+    whole-image CRC, swaps its boot slot, reboots and self-checks for 10 s;
+    a failed image rolls back automatically. The transfer resumes on its
+    own if the link drops mid-flash.
+  </div>
+  <div class="ota-progress"><div id="otaBar"></div></div>
+  <div id="otaText" class="ota-text">No image selected.</div>
+</section>
+
 <footer id="reportPane">
   <div class="pane-head">
     <h2>Report card</h2>

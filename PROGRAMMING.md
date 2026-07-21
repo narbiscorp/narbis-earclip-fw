@@ -89,6 +89,14 @@ only then marks itself valid. Any failure at any step = automatic
 rollback to the old firmware. The tool confirms success by re-reading the
 Device Information firmware-revision string after reconnect.
 
+**From the browser (no python needed):** the web test app
+(`tools/testapp/index.html`, Chrome/Edge over https or localhost) has a
+**Firmware update** panel — connect, pick `narbis_earclip.bin`, press
+Flash. Same protocol, same safety rails (CRC verify, auto-rollback,
+resume, reconnect + version confirmation). Works against production
+units too, not just TEST builds — pairing is triggered automatically if
+the unit requires it. `?mock=1` demos the whole flow without hardware.
+
 Useful variants:
 
 - `narbis-ota <bin> --loop 20` — the 20× acceptance soak (handoff DoD).

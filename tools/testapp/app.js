@@ -103,6 +103,8 @@ if (typeof document !== "undefined") (() => {
     clock: null,
     seqRunning: false, expectDisconnect: false,
     results: [],             /* report rows, one per step */
+    otaPending: new Map(),   /* tid -> pending, OTA_CTRL indications    */
+    flashing: false,         /* firmware update in progress             */
   };
 
   /* ---------------- logging ---------------- */
@@ -220,12 +222,199 @@ if (typeof document !== "undefined") (() => {
     };
   }
 
+  /* ================= firmware update (BLE OTA) =================
+   * Same protocol as tools/narbis_client/ota.py: ENTER_OTA on CONTROL,
+   * then BEGIN{size,crc32,version} / [u32 offset][chunk] WNR frames /
+   * periodic STATUS checkpoints / FINISH on OTA_CTRL. The device
+   * validates the image + CRC readback, swaps the boot slot, reboots,
+   * self-checks for 10 s, and auto-rolls back on failure. */
+
+  function otaCtrl(name, bytes, timeoutMs = 8000) {
+    const tid = S.tidNext;
+    S.tidNext = (S.tidNext + 1) & 0xFF;
+    if (S.tidNext === 0) S.tidNext = 1;
+    bytes[1] = tid;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        S.otaPending.delete(tid);
+        reject(new Error(`${name}: no OTA response within ${timeoutMs} ms`));
+      }, timeoutMs);
+      S.otaPending.set(tid, { name, resolve, reject, timer });
+      const c = S.chars.otaCtrl;
+      (c.writeValueWithResponse ? c.writeValueWithResponse(bytes)
+                                : c.writeValue(bytes)).catch((e) => {
+        const p = S.otaPending.get(tid);
+        if (p) { clearTimeout(p.timer); S.otaPending.delete(tid); }
+        reject(e);
+      });
+    });
+  }
+
+  function onOtaIndication(ev) {
+    let resp;
+    try { resp = NP.parseControlResponse(ev.target.value); }
+    catch (e) { log(`bad OTA indication: ${e.message}`); return; }
+    const p = S.otaPending.get(resp.tid);
+    if (!p) {
+      /* unsolicited progress indications are informational */
+      return;
+    }
+    clearTimeout(p.timer);
+    S.otaPending.delete(resp.tid);
+    if (resp.status !== P.ST_OK) {
+      p.reject(new Error(`${p.name}: device says ${NP.statusName(resp.status)}`));
+    } else {
+      p.resolve(resp);
+    }
+  }
+
+  function otaUi(pct, text, kind) {
+    const bar = $("otaBar"), lbl = $("otaText");
+    if (pct !== null) {
+      bar.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+    }
+    lbl.textContent = text;
+    lbl.classList.toggle("error", kind === "error");
+    lbl.classList.toggle("good", kind === "good");
+  }
+
+  function otaUiSync() {
+    const ready = !!(S.server && S.server.connected && S.chars.otaCtrl &&
+                     $("otaFile").files.length && !S.flashing &&
+                     !S.seqRunning);
+    $("btnFlash").disabled = !ready;
+  }
+
+  /* Web Bluetooth exposes no MTU: start at the protocol max (240-byte
+   * payload = 244-byte frame, fits the device-requested MTU 247) and
+   * halve on the platform write error until it goes through. */
+  async function otaWriteChunk(offset, chunk) {
+    const c = S.chars.otaData;
+    const frame = NP.ota.buildData(offset, chunk);
+    if (c.writeValueWithoutResponse) return c.writeValueWithoutResponse(frame);
+    return c.writeValue(frame);
+  }
+
+  async function flashFirmware(file) {
+    const image = new Uint8Array(await file.arrayBuffer());
+    if (image.length < 1024) throw new Error("that is not a firmware image");
+    /* ESP app images start 0xE9 (also true of merged factory images —
+     * refuse those: OTA takes the APP image, narbis_earclip.bin only). */
+    if (image[0] !== 0xE9) {
+      throw new Error("not an ESP application image (expected " +
+                      "firmware/build/narbis_earclip.bin)");
+    }
+    const crc = NP.ota.crc32(0, image);
+    const fwBefore = S.dis.fw || "?";
+    const version = file.name.replace(/\.bin$/i, "").slice(0, 24);
+
+    log(`flash: ${file.name}, ${image.length} bytes, crc32 ${crc.toString(16)}`);
+    otaUi(0, "Entering OTA mode…");
+    await ctrl("enterOta", []);
+
+    const begin = await otaCtrl("BEGIN",
+        NP.ota.buildBegin(0, image.length, crc, version));
+    let off = NP.ota.parseBeginResp(begin.payload).resumeOffset;
+    if (off) log(`flash: resuming at ${off}`);
+
+    let chunkSize = P.OTA_CHUNK_MAX;
+    const t0 = Date.now();
+    let sinceCheck = 0;
+    while (off < image.length) {
+      const chunk = image.subarray(off, Math.min(off + chunkSize, image.length));
+      try {
+        await otaWriteChunk(off, chunk);
+      } catch (e) {
+        if (chunkSize > 16) {
+          chunkSize = chunkSize >> 1;   /* platform MTU smaller than 247 */
+          log(`flash: write failed (${e.message}) — chunk size now ${chunkSize}`);
+          continue;
+        }
+        throw e;
+      }
+      off += chunk.length;
+      if (++sinceCheck >= 64 || off >= image.length) {
+        sinceCheck = 0;
+        const st = NP.ota.parseStatusResp(
+            (await otaCtrl("STATUS", NP.ota.buildStatus(0))).payload);
+        if (st.lastErr === P.OTAERR_EXPECTED_OFFSET || st.bytesRx !== off) {
+          log(`flash: reseek device=${st.bytesRx} host=${off}`);
+          off = st.bytesRx;             /* device is the truth — reseek */
+          continue;
+        }
+        if (st.state === P.OTA_FAILED) {
+          throw new Error(`device aborted: ${NP.ota.errName(st.lastErr)}`);
+        }
+        const kbps = (off / 1024) / Math.max(0.001, (Date.now() - t0) / 1000);
+        otaUi(100 * off / image.length,
+              `Transferring… ${(off / 1024).toFixed(0)} / ` +
+              `${(image.length / 1024).toFixed(0)} KB  (${kbps.toFixed(1)} KB/s)`);
+      }
+    }
+
+    otaUi(100, "Verifying + swapping boot slot…");
+    S.expectDisconnect = true;
+    await otaCtrl("FINISH", NP.ota.buildFinish(0), 20000);
+    log("flash: device accepted image — rebooting");
+
+    otaUi(100, "Device rebooting — waiting to reconnect…");
+    await new Promise((res) => {
+      if (!S.server.connected) return res();
+      const h = () => { S.device.removeEventListener("gattserverdisconnected", h); res(); };
+      S.device.addEventListener("gattserverdisconnected", h);
+    });
+    S.expectDisconnect = false;
+
+    /* reconnect to the SAME BluetoothDevice (no chooser needed) */
+    let back = false;
+    for (let i = 0; i < 12 && !back; i++) {
+      await new Promise((r) => setTimeout(r, 1500));
+      try { await connect(S.device); back = true; }
+      catch (e) { log(`reconnect attempt ${i + 1}: ${e.message}`); }
+    }
+    if (!back) {
+      throw new Error("device did not come back — if the new image failed " +
+                      "its self-check it rolls back automatically within " +
+                      "~15 s; reconnect manually to see which version runs");
+    }
+    const fwAfter = S.dis.fw || "?";
+    log(`flash: firmware ${fwBefore} -> ${fwAfter}`);
+    if (fwAfter === fwBefore) {
+      otaUi(100, `Reconnected, but firmware still reports ${fwAfter} — ` +
+            "same version re-flashed, or the device rolled back.", "error");
+    } else {
+      otaUi(100, `Success: ${fwBefore} → ${fwAfter}. The image self-checks ` +
+            "for 10 s and rolls back automatically if unhealthy.", "good");
+    }
+  }
+
+  async function onFlashClicked() {
+    const file = $("otaFile").files[0];
+    if (!file || S.flashing) return;
+    S.flashing = true;
+    otaUiSync();
+    $("btnStart").disabled = true;
+    try {
+      await flashFirmware(file);
+    } catch (e) {
+      log(`flash FAILED: ${e.message}`);
+      otaUi(null, `Failed: ${e.message}`, "error");
+      try { if (S.chars.otaCtrl) await otaCtrl("ABORT", NP.ota.buildAbort(0), 3000); }
+      catch (_) { /* link may be gone */ }
+    } finally {
+      S.flashing = false;
+      S.expectDisconnect = false;
+      otaUiSync();
+      $("btnStart").disabled = !(S.server && S.server.connected);
+    }
+  }
+
   /* ---------------- connect flow ---------------- */
 
-  async function connect() {
+  async function connect(reuseDevice) {
     banner(null);
-    S.bt = MOCK ? NarbisMock.create({ timescale: TS })
-                : navigator.bluetooth;
+    S.bt = S.bt || (MOCK ? NarbisMock.create({ timescale: TS })
+                         : navigator.bluetooth);
     if (!S.bt) {
       banner("Web Bluetooth is not available in this browser. Use Chrome/Edge " +
              "on desktop or Android (iOS has no Web Bluetooth — use the python " +
@@ -233,18 +422,23 @@ if (typeof document !== "undefined") (() => {
              "error");
       return;
     }
-    try {
-      S.device = await S.bt.requestDevice({
-        filters: [{ namePrefix: "Narbis Edge Earclip" }],
-        optionalServices: [P.UUID.SENSOR_SVC, P.UUID.OTA_SVC,
-                           P.UUID.BATTERY_SVC, P.UUID.DEVICE_INFO_SVC,
-                           P.UUID.HEART_RATE_SVC],
-      });
-    } catch (e) {
-      log(`requestDevice: ${e.message}`);
-      return;
+    if (reuseDevice) {
+      /* post-OTA reconnect: same BluetoothDevice, no chooser gesture */
+      S.device = reuseDevice;
+    } else {
+      try {
+        S.device = await S.bt.requestDevice({
+          filters: [{ namePrefix: "Narbis Edge Earclip" }],
+          optionalServices: [P.UUID.SENSOR_SVC, P.UUID.OTA_SVC,
+                             P.UUID.BATTERY_SVC, P.UUID.DEVICE_INFO_SVC,
+                             P.UUID.HEART_RATE_SVC],
+        });
+      } catch (e) {
+        log(`requestDevice: ${e.message}`);
+        return;
+      }
+      S.device.addEventListener("gattserverdisconnected", onDisconnected);
     }
-    S.device.addEventListener("gattserverdisconnected", onDisconnected);
     S.server = await S.device.gatt.connect();
     log(`connected to ${S.device.name}`);
 
@@ -316,6 +510,20 @@ if (typeof document !== "undefined") (() => {
       S.clock = { hostEpochUs: hostUs, devTUs: tsr.devTUs };
     } catch (e) { log(`time sync failed: ${e.message}`); }
 
+    /* OTA service: best-effort (a bench build always has it; production
+     * units gate it behind an encrypted link — Chrome will trigger OS
+     * pairing on first access if the device allows bonding). */
+    S.chars.otaCtrl = S.chars.otaData = null;
+    try {
+      const osvc = await S.server.getPrimaryService(P.UUID.OTA_SVC);
+      S.chars.otaCtrl = await osvc.getCharacteristic(P.UUID.OTA_CTRL);
+      S.chars.otaData = await osvc.getCharacteristic(P.UUID.OTA_DATA);
+      await S.chars.otaCtrl.startNotifications();
+      S.chars.otaCtrl.addEventListener("characteristicvaluechanged",
+                                       onOtaIndication);
+    } catch (e) { log(`OTA service not available: ${e.message}`); }
+    otaUiSync();
+
     updateHeader();
     $("btnConnect").classList.add("hidden");
     $("btnDisconnect").classList.remove("hidden");
@@ -336,6 +544,12 @@ if (typeof document !== "undefined") (() => {
       p.reject(new Error("disconnected"));
       S.pending.delete(tid);
     }
+    for (const [tid, p] of S.otaPending) {
+      clearTimeout(p.timer);
+      p.reject(new Error("disconnected"));
+      S.otaPending.delete(tid);
+    }
+    if (!S.flashing) otaUiSync();   /* flash flow owns the UI during reboot */
     if (S.expectDisconnect) {
       log("device disconnected (expected — sleep test)");
     } else {
@@ -1145,6 +1359,8 @@ if (typeof document !== "undefined") (() => {
   $("btnSkip").onclick = () => { if (activeCtx) activeCtx._skip(); };
   $("btnDownload").onclick = downloadReport;
   $("btnPrint").onclick = () => window.print();
+  $("btnFlash").onclick = () => onFlashClicked();
+  $("otaFile").onchange = () => otaUiSync();
 
   if (MOCK) {
     $("mockBadge").classList.remove("hidden");

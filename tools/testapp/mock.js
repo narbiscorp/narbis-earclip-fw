@@ -126,6 +126,10 @@ const NarbisMock = (() => {
       this._chargerLive = false;
       this._accelLive = false;
       this._chargerFlags = 0;          /* STF bits reflected in STATUS */
+      this._fwRev = "v0.9.0-mock";
+      this._otaGen = 0;
+      this._ota = { state: P.OTA_IDLE, size: 0, crc: 0, rx: 0, run: 0,
+                    lastErr: P.OTAERR_NONE };
       this._selftestRan = [];          /* records accumulated since boot */
       this._report = {
         device: MOCK_NAME,
@@ -183,7 +187,7 @@ const NarbisMock = (() => {
       switch (uuid) {
         case U.MANUFACTURER_NAME: return enc("Narbis");
         case U.MODEL_NUMBER: return enc("Edge Earclip");
-        case U.FIRMWARE_REVISION: return enc("v0.9.0-mock");
+        case U.FIRMWARE_REVISION: return enc(this._fwRev);
         case U.HARDWARE_REVISION: return enc("V2.1");
         case U.SOFTWARE_REVISION: return enc("mock");
         case U.BATTERY_LEVEL: return Uint8Array.of(76);
@@ -199,6 +203,15 @@ const NarbisMock = (() => {
 
     /* ---- GATT write handlers ---- */
     _write(uuid, bytes) {
+      if (uuid === P.UUID.OTA_DATA) {
+        this._otaData(bytes);
+        return;
+      }
+      if (uuid === P.UUID.OTA_CTRL) {
+        if (bytes.length < 2) throw new Error("mock: ota write too short");
+        this._after(15, () => this._otaControl(bytes[0], bytes[1], bytes.slice(2)));
+        return;
+      }
       if (uuid !== P.UUID.CONTROL) {
         throw new Error(`mock: unwritable characteristic ${uuid}`);
       }
@@ -206,6 +219,87 @@ const NarbisMock = (() => {
       const op = bytes[0], tid = bytes[1], pl = bytes.slice(2);
       /* dispatch out of the write context, like a real indication */
       this._after(25, () => this._control(op, tid, pl));
+    }
+
+    /* ---- OTA engine (mirrors ota.c: offset framing, whole-image CRC,
+     * reboot into the new version on FINISH) ---- */
+    _respondOta(op, tid, status, payload) {
+      const pl = payload || new Uint8Array(0);
+      const out = new Uint8Array(3 + pl.length);
+      out[0] = op | P.OP_RESP_FLAG; out[1] = tid; out[2] = status;
+      out.set(pl, 3);
+      this._char(P.UUID.OTA_CTRL)._push(out);
+    }
+
+    _otaControl(op, tid, pl) {
+      if (!this._connected) return;
+      const o = this._ota;
+      const d = (b) => new DataView(b.buffer, b.byteOffset, b.byteLength);
+      switch (op) {
+        case P.OTA_BEGIN: {
+          if (pl.length < 9) return this._respondOta(op, tid, P.ST_BAD_LEN);
+          const size = d(pl).getUint32(0, true);
+          const crc = d(pl).getUint32(4, true);
+          if (size === 0 || size > 0x190000) {
+            o.lastErr = P.OTAERR_SIZE;
+            return this._respondOta(op, tid, P.ST_BAD_PARAM);
+          }
+          /* resume only for the identical interrupted image */
+          if (!(o.state === P.OTA_RECEIVING && o.size === size && o.crc === crc)) {
+            o.size = size; o.crc = crc; o.rx = 0; o.run = 0;
+          }
+          o.state = P.OTA_RECEIVING;
+          o.lastErr = P.OTAERR_NONE;
+          const resp = new Uint8Array(4);
+          d(resp).setUint32(0, o.rx, true);
+          return this._respondOta(op, tid, P.ST_OK, resp);
+        }
+        case P.OTA_STATUS: {
+          const resp = new Uint8Array(7);
+          resp[0] = o.state;
+          d(resp).setUint32(1, o.rx, true);
+          d(resp).setUint16(5, o.lastErr, true);
+          return this._respondOta(op, tid, P.ST_OK, resp);
+        }
+        case P.OTA_FINISH: {
+          if (o.state !== P.OTA_RECEIVING || o.rx !== o.size) {
+            o.lastErr = P.OTAERR_STATE;
+            return this._respondOta(op, tid, P.ST_WRONG_STATE);
+          }
+          if ((o.run >>> 0) !== (o.crc >>> 0)) {
+            o.state = P.OTA_FAILED; o.lastErr = P.OTAERR_CRC;
+            return this._respondOta(op, tid, P.ST_CRC_ERR);
+          }
+          o.state = P.OTA_READY;
+          this._respondOta(op, tid, P.ST_OK);
+          /* "reboot": drop the link, come back with the new version */
+          this._after(150, () => {
+            this._fwRev = `${this._fwRev.split("+")[0]}+ota${++this._otaGen}`;
+            this._disconnect(true);
+          });
+          return undefined;
+        }
+        case P.OTA_ABORT:
+          o.state = P.OTA_IDLE; o.rx = 0; o.run = 0;
+          return this._respondOta(op, tid, P.ST_OK);
+        default:
+          return this._respondOta(op, tid, P.ST_UNKNOWN_OP);
+      }
+    }
+
+    _otaData(bytes) {
+      const o = this._ota;
+      if (o.state !== P.OTA_RECEIVING || bytes.length < 5) return;
+      const off = new DataView(bytes.buffer, bytes.byteOffset).getUint32(0, true);
+      if (off !== o.rx) {
+        /* out-of-order: latch and ignore until the host reseeks (ota.c) */
+        o.lastErr = P.OTAERR_EXPECTED_OFFSET;
+        return;
+      }
+      const chunk = bytes.slice(4);
+      o.run = NP.ota.crc32(o.rx === 0 ? 0 : o.run, chunk);
+      o.rx += chunk.length;
+      o.lastErr = P.OTAERR_NONE;
     }
 
     _respond(op, tid, status, payload) {
@@ -361,6 +455,11 @@ const NarbisMock = (() => {
         case P.OP_TEST_ACCEL_LIVE:
           this._accelLive = !!pl[0];
           if (this._accelLive) this._startAccelOrientation();
+          return ok();
+        case P.OP_ENTER_OTA:
+          /* acquisition stops, state -> OTA; transfer runs on the OTA
+           * service (see _otaControl/_otaData) */
+          this._streamMask = 0;
           return ok();
         case P.OP_TEST_SLEEP_NOW:
           ok();

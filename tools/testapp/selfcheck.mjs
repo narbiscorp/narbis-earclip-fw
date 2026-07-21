@@ -339,6 +339,94 @@ ok(report.selftest.some((r) => r.id === P.TEST_XTALK && r.status === P.TR_FAIL),
 }
 
 /* ================================================================ */
+/* [3] firmware update (BLE OTA): codecs + full mock flash walk       */
+console.log("[3] firmware update (BLE OTA)");
+{
+  /* codec sanity */
+  ok(NP.ota.crc32(0, new TextEncoder().encode("123456789")) === 0xCBF43926,
+     "crc32 check vector");
+  const beg = NP.ota.buildBegin(7, 0x12345, 0xDEADBEEF, "v1.2.3");
+  ok(beg[0] === P.OTA_BEGIN && beg[1] === 7 && beg[10] === 6, "BEGIN framing");
+  const df = NP.ota.buildData(0x1000, Uint8Array.of(1, 2, 3));
+  ok(df.length === 7 && NP.dv(df).getUint32(0, true) === 0x1000, "DATA framing");
+
+  /* full flash against a fresh mock device (the sleep test above
+   * ended the previous session) */
+  const bt2 = NarbisMock.create({ timescale: 0.02, seed: 43 });
+  const dev2 = await bt2.requestDevice({ filters: [] });
+  const srv2 = await dev2.gatt.connect();
+  const osvc = await srv2.getPrimaryService(P.UUID.OTA_SVC);
+  const octl = await osvc.getCharacteristic(P.UUID.OTA_CTRL);
+  const odat = await osvc.getCharacteristic(P.UUID.OTA_DATA);
+  await octl.startNotifications();
+
+  const disSvc = await srv2.getPrimaryService(P.UUID.DEVICE_INFO_SVC);
+  const fwChar = await disSvc.getCharacteristic(P.UUID.FIRMWARE_REVISION);
+  const fwBefore = new TextDecoder().decode(await fwChar.readValue());
+
+  const oPend = new Map();
+  let oTid = 1;
+  octl.addEventListener("characteristicvaluechanged", (ev) => {
+    const r = NP.parseControlResponse(ev.target.value);
+    const p = oPend.get(r.tid);
+    if (p) { oPend.delete(r.tid); p(r); }
+  });
+  const otaReq = (bytes) => new Promise((res) => {
+    bytes[1] = oTid = (oTid & 0xFF) + 1;
+    oPend.set(bytes[1], res);
+    octl.writeValue(bytes);
+  });
+
+  /* 5 KB pseudo-image (0xE9 magic like a real ESP app image) */
+  const img = new Uint8Array(5120);
+  img[0] = 0xE9;
+  for (let i = 1; i < img.length; i++) img[i] = (i * 31 + 7) & 0xFF;
+  const crc = NP.ota.crc32(0, img);
+
+  let r = await otaReq(NP.ota.buildBegin(0, img.length, crc, "selfcheck"));
+  ok(r.status === P.ST_OK, "OTA BEGIN ok");
+  ok(NP.ota.parseBeginResp(r.payload).resumeOffset === 0, "fresh start at 0");
+
+  for (let off = 0; off < img.length; off += 240) {
+    await odat.writeValueWithoutResponse(
+        NP.ota.buildData(off, img.subarray(off, Math.min(off + 240, img.length))));
+  }
+  r = await otaReq(NP.ota.buildStatus(0));
+  const st = NP.ota.parseStatusResp(r.payload);
+  ok(st.bytesRx === img.length && st.lastErr === P.OTAERR_NONE,
+     `all bytes received (${st.bytesRx})`);
+
+  /* out-of-order write latches EXPECTED_OFFSET and is ignored */
+  await odat.writeValueWithoutResponse(NP.ota.buildData(99999, Uint8Array.of(1)));
+  const st2 = NP.ota.parseStatusResp((await otaReq(NP.ota.buildStatus(0))).payload);
+  ok(st2.lastErr === P.OTAERR_EXPECTED_OFFSET && st2.bytesRx === img.length,
+     "offset gap latched, count unchanged");
+
+  let dropped2 = false;
+  dev2.addEventListener("gattserverdisconnected", () => { dropped2 = true; });
+  r = await otaReq(NP.ota.buildFinish(0));
+  ok(r.status === P.ST_OK, "FINISH ok (crc verified)");
+  await sleep(400);
+  ok(dropped2, "device rebooted after FINISH");
+
+  await dev2.gatt.connect();
+  const fwAfter = new TextDecoder().decode(await fwChar.readValue());
+  ok(fwAfter !== fwBefore && /\+ota1$/.test(fwAfter),
+     `firmware revision bumped (${fwBefore} -> ${fwAfter})`);
+
+  /* bad CRC path: device must refuse at FINISH */
+  const img2 = img.slice(); img2[100] ^= 0xFF;
+  r = await otaReq(NP.ota.buildBegin(0, img2.length, crc /* stale crc */, "bad"));
+  ok(r.status === P.ST_OK, "BEGIN (bad-crc run) ok");
+  for (let off = 0; off < img2.length; off += 240) {
+    await odat.writeValueWithoutResponse(
+        NP.ota.buildData(off, img2.subarray(off, Math.min(off + 240, img2.length))));
+  }
+  r = await otaReq(NP.ota.buildFinish(0));
+  ok(r.status === P.ST_CRC_ERR, "FINISH rejects corrupted image (CRC)");
+  dev2.gatt.disconnect();
+}
+
 console.log(`\nselfcheck: ${checks} checks, ${failures} failures`);
 if (failures) process.exit(1);
 console.log("OK");

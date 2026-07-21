@@ -104,6 +104,7 @@ const NarbisProto = (() => {
     knobSet: (tid, id, value) =>
       buildControlRequest(P.OP_KNOB_SET, tid, pack([["u16", id], ["i32", value]])),
     knobSave: (tid) => buildControlRequest(P.OP_KNOB_SAVE, tid),
+    enterOta: (tid) => buildControlRequest(P.OP_ENTER_OTA, tid),
     knobReset: (tid, scope) =>
       buildControlRequest(P.OP_KNOB_RESET, tid, pack([["u8", scope]])),
     knobDiscover: (tid, startIndex) =>
@@ -447,6 +448,69 @@ const NarbisProto = (() => {
     return 16384 >> (fsCode & P.ACCF_FS_MASK);
   }
 
+  /* ---------------- OTA (firmware flashing over BLE) ------------------- */
+  /* OTA_CTRL uses the CONTROL envelope ([op][tid] -> [op|0x80][tid][st]);
+   * OTA_DATA is raw write-no-response frames [u32 offset][chunk]. Matches
+   * ota.c / proto.h NC_OTA_* and tools/narbis_client/ota.py. */
+
+  /* CRC-32 (zlib polynomial), incremental: crc32(prev, bytes). Must match
+   * the device's nc_crc32 and python zlib.crc32. */
+  const CRC_TAB = (() => {
+    const t = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      t[n] = c >>> 0;
+    }
+    return t;
+  })();
+  function crc32(crc, bytes) {
+    let c = (crc ^ 0xFFFFFFFF) >>> 0;
+    for (let i = 0; i < bytes.length; i++) {
+      c = (CRC_TAB[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8)) >>> 0;
+    }
+    return (c ^ 0xFFFFFFFF) >>> 0;
+  }
+
+  const ota = {
+    crc32,
+    buildBegin(tid, size, crc, versionStr) {
+      const v = new TextEncoder().encode(versionStr || "");
+      const out = new Uint8Array(2 + 9 + v.length);
+      const d = dv(out);
+      out[0] = P.OTA_BEGIN; out[1] = tid;
+      d.setUint32(2, size >>> 0, true);
+      d.setUint32(6, crc >>> 0, true);
+      out[10] = v.length;
+      out.set(v, 11);
+      return out;
+    },
+    buildStatus(tid) { return Uint8Array.of(P.OTA_STATUS, tid); },
+    buildFinish(tid) { return Uint8Array.of(P.OTA_FINISH, tid); },
+    buildAbort(tid) { return Uint8Array.of(P.OTA_ABORT, tid); },
+    buildData(offset, chunk) {
+      const out = new Uint8Array(4 + chunk.length);
+      dv(out).setUint32(0, offset >>> 0, true);
+      out.set(chunk, 4);
+      return out;
+    },
+    parseBeginResp(payload) {
+      return { resumeOffset: dv(payload).getUint32(0, true) };
+    },
+    parseStatusResp(payload) {
+      const d = dv(payload);
+      return { state: d.getUint8(0), bytesRx: d.getUint32(1, true),
+               lastErr: d.getUint16(5, true) };
+    },
+    stateName(s) {
+      return ["IDLE", "RECEIVING", "VALIDATING", "READY", "FAILED"][s] || `state${s}`;
+    },
+    errName(e) {
+      return ["NONE", "EXPECTED_OFFSET", "SIZE", "CRC", "IMAGE", "FLASH",
+              "STATE"][e] || `err${e}`;
+    },
+  };
+
   return {
     P,
     dv, bytesOf,
@@ -457,6 +521,7 @@ const NarbisProto = (() => {
     parseChunk, parseStatus, parsePpg, parseAccel, parseIbi,
     parseEventBatch, decodeEvent, parseSelftestBlob, parseKnobDiscoverChunk,
     opName, statusName, fsCountsPerG,
+    ota,
   };
 })();
 
