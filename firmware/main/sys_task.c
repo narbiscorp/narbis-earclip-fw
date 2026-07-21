@@ -95,6 +95,16 @@ static int64_t s_warn_since = -1, s_stop_since = -1, s_off_since = -1;
 
 static int64_t s_last_activity_us;
 static int64_t s_offear_since = -1;   /* off-ear auto-sleep countdown   */
+
+/* Wear re-probe: while off-ear with live PPG demand, periodically lift
+ * the wear veto so the sample-clocked detector can see re-wear (it
+ * needs PPG frames — a hard pause would be a one-way trap). 5 s probe
+ * every 15 s ≈ 33% LED duty while off-ear-but-subscribed; the off-ear
+ * auto-sleep countdown still runs and eventually wins. */
+#define WEAR_PROBE_ON_US   (5LL * 1000 * 1000)
+#define WEAR_PROBE_PERIOD_US (15LL * 1000 * 1000)
+static bool s_wear_probe;
+static int64_t s_probe_until, s_probe_next;
 static int64_t s_ota_enter_us;
 #define OTA_NO_BEGIN_TIMEOUT_US  (60LL * 1000000)
 #define BOOT_LOWBATT_ADV_US      (10LL * 1000000)
@@ -218,6 +228,39 @@ static void set_state(nc_sys_state_t ns)
 }
 
 /* ------------------------------------------------------------------ */
+/* Connection-state sync. Called from the SYS_CONN_CHANGE message AND
+ * level-checked at every 1 Hz tick: a dropped disconnect edge (sys_q
+ * full while sys_task was blocked in selftest/OTA) would otherwise
+ * leave s_connected latched true forever — indefinite streaming to
+ * nobody and idle auto-off suppressed until the cell dies.            */
+/* ------------------------------------------------------------------ */
+static void demand(void);
+
+static void conn_sync(bool up)
+{
+    s_connected = up;
+    if (!up) {
+        /* Session state dies with the link: subscriptions, stream
+         * overrides and the AGC freeze are per-central. */
+        s_in.sub_ppg = s_in.sub_accel = s_in.sub_ibi = false;
+        s_in.sub_event = s_in.sub_hrs = false;
+        s_in.ctrl_start_mask = 0;
+        s_in.ctrl_stop_mask = 0;
+        if (s_agc_frozen) {
+            s_agc_frozen = false;
+            acq_set_agc_frozen(false);
+        }
+        if (s_state == NC_STATE_OTA) {
+            /* Engine keeps the partial image for resume; the mode
+             * itself does not survive the link. */
+            set_state(NC_STATE_IDLE);
+        }
+    }
+    s_last_activity_us = esp_timer_get_time();
+    demand();
+}
+
+/* ------------------------------------------------------------------ */
 /* Demand evaluation                                                   */
 /* ------------------------------------------------------------------ */
 static void demand(void)
@@ -226,7 +269,7 @@ static void demand(void)
 #if NARBIS_TEST_MODE
     s_in.wear_paused = false;        /* test builds never wear-gate */
 #else
-    s_in.wear_paused = !s_worn;
+    s_in.wear_paused = !s_worn && !s_wear_probe;
 #endif
     /* usb_stream_ok doubles as the unconditional all-off input for the
      * low-battery stop level, the LOWBATT boot refusal and the OTA /
@@ -319,9 +362,10 @@ static nc_ctrl_status_t cb_set_rate(void *u, uint8_t rate_code)
             ESP_LOGE(TAG, "rate switch: %s", esp_err_to_name(err));
             return NC_ST_BUSY;
         }
+        (void)old;
         s_rate_live = (nc_rate_t)rate_code;
-        const uint8_t d[2] = { old, rate_code };
-        ev_emit(NC_EV_RATE_CHANGE, d, 2);
+        /* acq_ppg_set_rate posts NC_EV_RATE_CHANGE at the true switch
+         * point — no second emission here. */
     }
     return NC_ST_OK;
 }
@@ -349,10 +393,8 @@ static nc_ctrl_status_t cb_knob_reset(void *u, uint8_t scope)
     if (acq_ppg_running() &&
         (nc_rate_t)nc_knob_get(KNOB_PPG_RATE) != s_rate_live) {
         if (acq_ppg_set_rate((nc_rate_t)nc_knob_get(KNOB_PPG_RATE)) == ESP_OK) {
-            const uint8_t d[2] = { (uint8_t)s_rate_live,
-                                   (uint8_t)nc_knob_get(KNOB_PPG_RATE) };
+            /* NC_EV_RATE_CHANGE comes from acq_ppg_set_rate itself. */
             s_rate_live = (nc_rate_t)nc_knob_get(KNOB_PPG_RATE);
-            ev_emit(NC_EV_RATE_CHANGE, d, 2);
         }
     }
     if (scope == 1 && knobs_nvs_reset() != ESP_OK) {
@@ -473,26 +515,17 @@ static nc_ctrl_status_t cb_selftest_run(void *u, uint32_t test_mask)
 
     set_state(NC_STATE_SELFTEST);
     demand();                   /* SELFTEST state forces acquisition off */
-    selftest_execute(test_mask);   /* blocking, sys ctx — I2C serialized */
-
-    /* SELFTEST_DONE pass/fail counts come from the result blob
-     * ([u8 ver][u64 t_run][u8 n][n x {id,status,i32 val,i32 thr}]). */
-    uint16_t blen = 0;
-    const uint8_t *blob = selftest_blob(&blen);
-    uint8_t pass = 0, fail = 0;
-    if (blob != NULL && blen >= 10) {
-        const uint8_t n = blob[9];
-        for (uint8_t i = 0; i < n && (10u + 10u * i + 1u) < blen; i++) {
-            const uint8_t r = blob[10 + 10 * i + 1];
-            if (r == NC_TR_PASS) pass++;
-            else if (r == NC_TR_FAIL) fail++;
-        }
-    }
-    const uint8_t d[2] = { pass, fail };
-    ev_emit(NC_EV_SELFTEST_DONE, d, 2);
+    selftest_execute(test_mask);   /* blocking, sys ctx — I2C serialized;
+                                      it queues NC_EV_SELFTEST_DONE itself */
 
     set_state(s_connected ? NC_STATE_CONNECTED : NC_STATE_IDLE);
     demand();                   /* restore whatever was streaming */
+    if (!acq_ppg_running()) {
+        /* Selftest brought the AFE up for the optical tests; if the
+         * restore did not resume streaming, park it back in hardware
+         * PWDN (~8 uA) instead of leaving it converting in IDLE. */
+        (void)afe4404_powerdown_hw();
+    }
     return NC_ST_OK;
 }
 
@@ -784,6 +817,35 @@ static void handle_tick(void)
 {
     const int64_t now = esp_timer_get_time();
 
+    /* Level-check the link: a dropped SYS_CONN_CHANGE edge must heal
+     * within one tick (see conn_sync). */
+    {
+        const bool conn = ble_is_connected();
+        if (conn != s_connected) {
+            ESP_LOGW(TAG, "conn state resync (%d -> %d)", s_connected, conn);
+            conn_sync(conn);
+        }
+    }
+
+    /* Wear re-probe window bookkeeping (see the statics' comment). */
+#if !NARBIS_TEST_MODE
+    if (s_wear_probe && now >= s_probe_until) {
+        s_wear_probe = false;
+        demand();
+    } else if (!s_worn && !s_wear_probe && now >= s_probe_next) {
+        const bool ppg_wanted = s_in.sub_ppg || s_in.sub_ibi ||
+                                s_in.sub_hrs ||
+                                (s_in.ctrl_start_mask &
+                                 (NC_STREAM_MASK_PPG | NC_STREAM_MASK_IBI));
+        if (ppg_wanted) {
+            s_wear_probe = true;
+            s_probe_until = now + WEAR_PROBE_ON_US;
+            s_probe_next = now + WEAR_PROBE_PERIOD_US;
+            demand();
+        }
+    }
+#endif
+
     uint16_t mv;
     uint8_t pct;
     if (battery_status(&mv, &pct) == ESP_OK) {
@@ -821,6 +883,11 @@ static void handle_tick(void)
 
     if (s_state == NC_STATE_OTA) {
         (void)ota_deadline_check();   /* engine-side bookkeeping */
+    }
+    /* Post-OTA hardware self-check runs HERE (sys ctx serializes all
+     * AFE/accel I2C) — the esp_timer callback only marks it due. */
+    ota_self_check_poll();
+    if (s_state == NC_STATE_OTA) {
         if (!ota_active() && now - s_ota_enter_us >= OTA_NO_BEGIN_TIMEOUT_US) {
             ESP_LOGW(TAG, "OTA: no BEGIN within 60 s — leaving OTA state");
             set_state(s_connected ? NC_STATE_CONNECTED : NC_STATE_IDLE);
@@ -978,6 +1045,10 @@ void sys_task_run(void *arg)
         case SYS_WEAR_CHANGED:
             if (m.u.flag != s_worn) {
                 s_worn = m.u.flag;
+                if (s_worn) {
+                    s_wear_probe = false;   /* probe did its job */
+                    s_probe_next = 0;
+                }
                 const uint8_t d[1] = { (uint8_t)s_worn };
                 ev_emit(NC_EV_WEAR, d, 1);
                 acq_set_extra_ppg_flags(s_worn ? 0 : NC_PPGF_WEAR_OFF,
@@ -998,26 +1069,7 @@ void sys_task_run(void *arg)
             orderly_off(false);
             break;
         case SYS_CONN_CHANGE:
-            s_connected = m.u.flag;
-            if (!s_connected) {
-                /* Session state dies with the link: subscriptions,
-                 * stream overrides and the AGC freeze are per-central. */
-                s_in.sub_ppg = s_in.sub_accel = s_in.sub_ibi = false;
-                s_in.sub_event = s_in.sub_hrs = false;
-                s_in.ctrl_start_mask = 0;
-                s_in.ctrl_stop_mask = 0;
-                if (s_agc_frozen) {
-                    s_agc_frozen = false;
-                    acq_set_agc_frozen(false);
-                }
-                if (s_state == NC_STATE_OTA) {
-                    /* Engine keeps the partial image for resume; the
-                     * mode itself does not survive the link. */
-                    set_state(NC_STATE_IDLE);
-                }
-            }
-            s_last_activity_us = esp_timer_get_time();
-            demand();
+            conn_sync(m.u.flag);
             break;
         case SYS_ENTER_OTA:
             /* OTA service saw a BEGIN without a prior CONTROL enter. */

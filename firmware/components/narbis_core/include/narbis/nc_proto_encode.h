@@ -56,6 +56,12 @@ size_t nc_ppg_batch_finish(nc_ppg_batch_t *b, uint8_t flags, uint8_t **out);
 
 static inline uint8_t nc_ppg_batch_count(const nc_ppg_batch_t *b) { return b->n; }
 
+/* Clamp the batch fill to an ATT payload budget (negotiated MTU - 3,
+ * from ble_att_payload_budget()). Without this, a peer that negotiated
+ * less than MTU 247 gets every oversized notification silently
+ * truncated by the stack. Call after reset; keeps at least 1 sample. */
+void nc_ppg_batch_set_cap(nc_ppg_batch_t *b, uint16_t payload_budget);
+
 /* ------------------------------------------------------------------ */
 /* Accel batch builder (same lifecycle; fixed 6-byte stride)           */
 /* ------------------------------------------------------------------ */
@@ -65,6 +71,7 @@ typedef struct {
     uint32_t seq;
     uint8_t  odr_code;
     uint8_t  n;
+    uint8_t  max_n;      /* NC_ACCEL_MAX_N, or lower via set_cap        */
 } nc_accel_batch_t;
 
 void   nc_accel_batch_reset(nc_accel_batch_t *b, uint32_t seq, uint8_t odr_code);
@@ -73,6 +80,9 @@ bool   nc_accel_batch_add(nc_accel_batch_t *b, uint64_t t_us, int16_t x, int16_t
 size_t nc_accel_batch_finish(nc_accel_batch_t *b, uint8_t flags, uint8_t **out);
 
 static inline uint8_t nc_accel_batch_count(const nc_accel_batch_t *b) { return b->n; }
+
+/* Accel twin of nc_ppg_batch_set_cap. */
+void nc_accel_batch_set_cap(nc_accel_batch_t *b, uint16_t payload_budget);
 
 /* ------------------------------------------------------------------ */
 /* One-shot encoders. All return the total byte count written, or 0    */

@@ -12,6 +12,7 @@ idf_component_register(
         src/nc_batt_curve.c
         src/nc_button.c
         src/nc_dsp.c
+        src/nc_dsp_design.c
         src/nc_gate.c
         src/nc_ibi.c
         src/nc_knobs.c

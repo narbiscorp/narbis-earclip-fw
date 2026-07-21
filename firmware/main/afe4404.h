@@ -60,3 +60,8 @@ uint8_t afe4404_cur_ir_ma(void);
 uint8_t afe4404_cur_red_ma(void);
 uint8_t afe4404_cur_rf(void);
 uint8_t afe4404_cur_cf(void);
+
+/* True between a successful afe4404_init() and afe4404_powerdown_hw().
+ * Callers that cache their own bring-up state (test_ops bench) must
+ * also consult this — hardware PWDN wipes every register. */
+bool afe4404_is_up(void);

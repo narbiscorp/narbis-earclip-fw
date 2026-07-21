@@ -99,7 +99,17 @@ esp_err_t acq_imu_module_init(void)
     if (s_imu_mtx == NULL) {
         return ESP_ERR_NO_MEM;
     }
-    esp_err_t err = gpio_set_intr_type(PIN_ACC_INT1, GPIO_INTR_POSEDGE);
+    /* Bring the device up FIRST: lis2dh12_init owns the INT1 pad's
+     * gpio_config and creates the I2C device handle that every later
+     * lis2dh12_config/start depends on (nothing else on the normal
+     * boot path calls it). A failure here means the accel is absent —
+     * surface it like any other init failure. */
+    esp_err_t err = lis2dh12_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "lis2dh12_init failed (%s)", esp_err_to_name(err));
+        return err;
+    }
+    err = gpio_set_intr_type(PIN_ACC_INT1, GPIO_INTR_POSEDGE);
     if (err != ESP_OK) {
         return err;
     }
@@ -129,6 +139,7 @@ static void accel_flush_locked(void)
     }
     s_ovr_latch = false;
     nc_accel_batch_reset(&s_abatch, s_acc_seq, (uint8_t)s_odr);
+    nc_accel_batch_set_cap(&s_abatch, ble_att_payload_budget());
 }
 
 /* ------------------------------------------------------------------ */
@@ -196,6 +207,7 @@ void acq_imu_task_run(void *arg)
              * samples rather than emit them arbitrarily later. */
             s_ovr_latch = false;
             nc_accel_batch_reset(&s_abatch, s_acc_seq, (uint8_t)s_odr);
+            nc_accel_batch_set_cap(&s_abatch, ble_att_payload_budget());
         }
 
         xSemaphoreGive(s_imu_mtx);
@@ -235,6 +247,7 @@ esp_err_t acq_accel_start(void)
     s_acc_seq = 0;
     s_ovr_latch = false;
     nc_accel_batch_reset(&s_abatch, 0, (uint8_t)odr);
+    nc_accel_batch_set_cap(&s_abatch, ble_att_payload_budget());
     xSemaphoreGive(s_imu_mtx);
     s_ovr_active = false;
 

@@ -36,6 +36,7 @@ static portMUX_TYPE s_pulse_mux = portMUX_INITIALIZER_UNLOCKED;
 static uint8_t s_ir_ma, s_red_ma;
 static uint8_t s_rf = AFE_RF_100K, s_cf = AFE_CF_5PF;
 static int8_t  s_offdac[4];          /* [0] LED1, [1] LED2, [2] AMB1, [3] AMB2 */
+static bool    s_up;                 /* true between init success and PWDN */
 
 static void lock(void)   { xSemaphoreTake(s_mtx, portMAX_DELAY); }
 static void unlock(void) { xSemaphoreGive(s_mtx); }
@@ -167,10 +168,16 @@ esp_err_t afe4404_init(nc_rate_t rate)
 
     err = afe4404_apply_rate(rate);
     if (err == ESP_OK) {
+        s_up = true;
         ESP_LOGI(TAG, "up: %u sps, RF=100k CF=5pF, LEDs off",
                  nc_rate_sps(rate));
     }
     return err;
+}
+
+bool afe4404_is_up(void)
+{
+    return s_up;
 }
 
 esp_err_t afe4404_apply_rate(nc_rate_t rate)
@@ -331,6 +338,7 @@ esp_err_t afe4404_powerdown_hw(void)
      * registers are LOST; the only way back is afe4404_init(). power.c is
      * responsible for gpio_hold_en before deep sleep so R1 cannot pull the
      * pin (and the AFE) back up. */
+    s_up = false;
     return gpio_set_level(PIN_AFE_RESET, 0);
 }
 

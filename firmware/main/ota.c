@@ -32,6 +32,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <inttypes.h>
 
 #include "freertos/FreeRTOS.h"
@@ -503,12 +504,27 @@ void ota_deadline_check(void)
  *    state. The CONTROL2 readback suggested by the plan is skipped
  *    deliberately: afe4404_reg_read() is contract-limited to TIMEREN=0
  *    and init leaves the timer running — init success is the stronger
- *    probe anyway. Races with sys_task starting acquisition in the same
- *    microsecond window are accepted (first boot after OTA, 10 s in).
+ *    probe anyway.
+ *
+ * CONTEXT SPLIT: the esp_timer callback only marks the check due; the
+ * I2C/GPIO probes run in ota_self_check_poll() from sys_task's 1 Hz
+ * tick — sys context serializes them against acq_ppg_start/stop (an
+ * esp_timer-context afe4404_init could interleave with a live stream
+ * start and then power the AFE down under it).
  */
+static _Atomic bool s_selfcheck_due;
+
 static void validate_tmr_cb(void *arg)
 {
     (void)arg;
+    atomic_store(&s_selfcheck_due, true);
+}
+
+void ota_self_check_poll(void)
+{
+    if (!atomic_exchange(&s_selfcheck_due, false)) {
+        return;
+    }
     bool ok = true;
 
     nvs_stats_t stats;
@@ -563,8 +579,8 @@ void ota_boot_validate(void)
     if (esp_timer_create(&val, &s_validate_tmr) == ESP_OK) {
         esp_timer_start_once(s_validate_tmr, OTA_VALIDATE_DELAY_US);
     } else {
-        /* Can't schedule the check: validate now-or-never is worse than
-         * a synchronous minimal check; do it inline (boot context). */
-        validate_tmr_cb(NULL);
+        /* Can't schedule: mark due immediately — the sys 1 Hz poll
+         * runs the check on its next tick. */
+        atomic_store(&s_selfcheck_due, true);
     }
 }

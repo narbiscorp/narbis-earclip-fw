@@ -22,6 +22,17 @@ void nc_ppg_batch_reset(nc_ppg_batch_t *b, uint32_t seq, uint8_t rate_code, bool
     b->t0_us = 0;
 }
 
+void nc_ppg_batch_set_cap(nc_ppg_batch_t *b, uint16_t payload_budget)
+{
+    uint16_t fit = (payload_budget > NC_PPG_HDR_SIZE)
+                       ? (uint16_t)((payload_budget - NC_PPG_HDR_SIZE) / b->stride)
+                       : 0;
+    uint8_t hard = b->amb ? NC_PPG_MAX_N_AMB : NC_PPG_MAX_N_NOAMB;
+    if (fit < 1) fit = 1;          /* never wedge: 1 sample always flows */
+    if (fit > hard) fit = hard;
+    b->max_n = (uint8_t)fit;
+}
+
 bool nc_ppg_batch_add(nc_ppg_batch_t *b, uint64_t t_us, int32_t ir, int32_t red, int32_t amb)
 {
     if (b->n >= b->max_n) return false;   /* full: sample NOT stored */
@@ -56,11 +67,22 @@ void nc_accel_batch_reset(nc_accel_batch_t *b, uint32_t seq, uint8_t odr_code)
     b->odr_code = odr_code;
     b->n = 0;
     b->t0_us = 0;
+    b->max_n = NC_ACCEL_MAX_N;
+}
+
+void nc_accel_batch_set_cap(nc_accel_batch_t *b, uint16_t payload_budget)
+{
+    uint16_t fit = (payload_budget > NC_ACCEL_HDR_SIZE)
+                       ? (uint16_t)((payload_budget - NC_ACCEL_HDR_SIZE) / 6u)
+                       : 0;
+    if (fit < 1) fit = 1;
+    if (fit > NC_ACCEL_MAX_N) fit = NC_ACCEL_MAX_N;
+    b->max_n = (uint8_t)fit;
 }
 
 bool nc_accel_batch_add(nc_accel_batch_t *b, uint64_t t_us, int16_t x, int16_t y, int16_t z)
 {
-    if (b->n >= NC_ACCEL_MAX_N) return false;
+    if (b->n >= b->max_n) return false;
     if (b->n == 0) b->t0_us = t_us;
     uint8_t *p = b->buf + NC_ACCEL_HDR_SIZE + (size_t)b->n * 6;
     nc_wr_i16(p, x);

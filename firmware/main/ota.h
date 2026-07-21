@@ -30,3 +30,9 @@ bool ota_active(void);
  * esp_ota_abort + FAILED (also bounds the resume window: a BEGIN with
  * the same {size,crc} resumes only while the session is still open). */
 void ota_deadline_check(void);
+
+/* Post-OTA hardware self-check: the 10 s esp_timer only marks it due;
+ * sys_task calls this at 1 Hz and the probes (I2C/GPIO) run in sys
+ * context, serialized against acquisition start/stop. No-op unless a
+ * PENDING_VERIFY image armed it. May not return (rollback reboots). */
+void ota_self_check_poll(void);

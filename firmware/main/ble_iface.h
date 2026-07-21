@@ -32,6 +32,12 @@ bool ble_tx_submit(ble_chan_t ch, const uint8_t *pkt, uint16_t len);
 bool ble_is_connected(void);
 void ble_get_conn_stats(uint16_t *mtu, uint8_t *phy, uint16_t *interval_1_25ms);
 
+/* Current ATT notification payload ceiling = min(negotiated MTU - 3,
+ * NC_ATT_PAYLOAD_MAX). Producers of large stream packets (PPG/ACCEL
+ * batchers) clamp their fill to this after every batch reset — the
+ * stack silently truncates oversized notifications. */
+uint16_t ble_att_payload_budget(void);
+
 /* Bonding window: advertise connectable+bondable and accept a new bond
  * for the given duration (button double-press or open_pairing knob). */
 void ble_open_pairing_window(uint32_t seconds);

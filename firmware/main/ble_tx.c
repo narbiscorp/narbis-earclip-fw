@@ -288,8 +288,11 @@ static bool drain_channel(int ch)
         }
 
         if (rc == BLE_HS_ENOTCONN) {
-            ring_push_front(ch, pkt, len);
-            return false;           /* disconnect flush is imminent */
+            /* Link gone mid-drain: this packet belongs to the dead
+             * session. Do NOT re-stage it — that races the disconnect
+             * flush and could resurrect it into the next central's
+             * session. Drop it and end the pass. */
+            return false;
         }
         if (rc_is_transient(rc)) {
             ring_push_front(ch, pkt, len);

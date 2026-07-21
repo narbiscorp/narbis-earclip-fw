@@ -69,6 +69,10 @@ static const char *boot_cause_str(pwr_boot_cause_t c)
 
 void app_main(void)
 {
+    /* Before ANYTHING else: catch short button taps that will have been
+     * released by the time the full ghost recheck runs (~250 ms in). */
+    power_early_wake_capture();
+
     /* NVS with the standard erase-retry idiom (page format changes /
      * truncated partitions after reflash). */
     esp_err_t err = nvs_flash_init();
@@ -88,9 +92,11 @@ void app_main(void)
 
     switch (cause) {
     case PWR_BOOT_GHOST:
-        /* TVS/cap ringing, not a person. No BLE, no sensors. */
+        /* TVS/cap ringing, not a person. No BLE, no sensors. Re-sleep
+         * with the PREVIOUS off policy — a battery-forced OFF must keep
+         * its 12 h recheck timer across ghost wakes. */
         ESP_LOGW(TAG, "ghost ext1 wake — returning to sleep");
-        power_enter_off(false);   /* noreturn */
+        power_enter_off(power_last_off_battery_forced());   /* noreturn */
         break;
 
     case PWR_BOOT_TIMER: {

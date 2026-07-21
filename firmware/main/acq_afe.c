@@ -123,6 +123,18 @@ esp_err_t acq_afe_module_init(void)
     return gpio_intr_disable(PIN_ADC_RDY);
 }
 
+/* Re-register the streaming ADC_RDY ISR after a module (selftest) that
+ * temporarily claimed the pin with its own handler releases it. Leaves
+ * the interrupt disarmed, exactly like module init — ppg_start arms it. */
+esp_err_t acq_afe_rdy_isr_restore(void)
+{
+    esp_err_t err = gpio_isr_handler_add(PIN_ADC_RDY, afe_rdy_isr, NULL);
+    if (err == ESP_OK) {
+        err = gpio_intr_disable(PIN_ADC_RDY);
+    }
+    return err;
+}
+
 /* ------------------------------------------------------------------ */
 /* Batch helpers — caller holds s_batch_mtx.                           */
 /* ------------------------------------------------------------------ */
@@ -147,6 +159,7 @@ static void ppg_flush_locked(void)
     }
     s_clipped = false;
     nc_ppg_batch_reset(&s_batch, s_ppg_seq, (uint8_t)s_rate, s_amb_mode);
+    nc_ppg_batch_set_cap(&s_batch, ble_att_payload_budget());
 }
 
 /* ------------------------------------------------------------------ */
@@ -213,6 +226,7 @@ void acq_afe_task_run(void *arg)
             ppg_flush_locked();          /* flushes under the OLD mode  */
             s_amb_mode = amb_stream;
             nc_ppg_batch_reset(&s_batch, s_ppg_seq, (uint8_t)s_rate, s_amb_mode);
+            nc_ppg_batch_set_cap(&s_batch, ble_att_payload_budget());
         }
 
         int32_t thr = acq_sat_thr_counts();
@@ -269,6 +283,7 @@ esp_err_t acq_ppg_start(nc_rate_t rate)
     s_rate_flag_pending = false;
     s_amb_mode = nc_knob_get(KNOB_AMB_STREAM) != 0;
     nc_ppg_batch_reset(&s_batch, 0, (uint8_t)rate, s_amb_mode);
+    nc_ppg_batch_set_cap(&s_batch, ble_att_payload_budget());
     xSemaphoreGive(s_batch_mtx);
 
     /* Full DSP-side reset (filters, IBI, gate, AGC shadow, wear, duty). */
@@ -356,6 +371,7 @@ esp_err_t acq_ppg_set_rate(nc_rate_t rate)
     s_rate_flag_pending = true;          /* arm NC_PPGF_RATE_CHANGED    */
     s_clipped = false;
     nc_ppg_batch_reset(&s_batch, s_ppg_seq, (uint8_t)rate, s_amb_mode);
+    nc_ppg_batch_set_cap(&s_batch, ble_att_payload_budget());
     xSemaphoreGive(s_batch_mtx);
 
     uint8_t d[2] = { old_code, (uint8_t)rate };

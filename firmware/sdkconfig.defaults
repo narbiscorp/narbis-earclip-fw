@@ -10,6 +10,14 @@ CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
 CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247
 CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=24
 CONFIG_BT_NIMBLE_NVS_PERSIST=y
+# Controller sleep: without this the BLE controller holds a CPU_FREQ_MAX
+# pm lock forever and DFS/auto-light-sleep never engage (IDLE power target
+# unmeetable). LP clock from main XTAL (no external 32k on the XIAO).
+CONFIG_BT_LE_SLEEP_ENABLE=y
+CONFIG_BT_LE_LP_CLK_SRC_MAIN_XTAL=y
+# bt.c hard-requires MAC/baseband power-down for BLE light sleep
+# (depends on tickless idle, which is on below).
+CONFIG_ESP_PHY_MAC_BB_PD=y
 
 # --- FreeRTOS / power management ---
 CONFIG_FREERTOS_HZ=1000

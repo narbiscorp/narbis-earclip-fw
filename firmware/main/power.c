@@ -31,6 +31,7 @@
 #include "freertos/FreeRTOS.h"
 
 #include "driver/gpio.h"
+#include "esp_attr.h"
 #include "driver/rtc_io.h"
 #include "esp_log.h"
 #include "esp_pm.h"
@@ -59,6 +60,13 @@ bool power_ble_started = false;
 static esp_pm_lock_handle_t s_lock_no_ls;   /* ESP_PM_NO_LIGHT_SLEEP */
 static esp_pm_lock_handle_t s_lock_cpu_max; /* ESP_PM_CPU_FREQ_MAX   */
 static bool s_held_no_ls, s_held_cpu_max;
+
+/* Early ext1 evidence captured at app_main entry (short-tap catch). */
+static bool s_early_saw_low;
+
+/* Why the last OFF happened — survives deep sleep in LP SRAM so a
+ * ghost re-sleep keeps the battery-forced 12 h recheck policy. */
+static RTC_DATA_ATTR bool s_off_batt_forced;
 
 esp_err_t power_init(void)
 {
@@ -139,9 +147,14 @@ pwr_boot_cause_t power_boot_cause(void)
     }
 
     /* EXT1: confirm a human press. TVS/C22 ringing on the button net
-     * can fire ext1 without a real press (ghost). Re-sample over a
-     * BUTTON_DEBOUNCE_MS window: >= 80 % low AND still low at the end
-     * = held; anything else = ghost, caller goes back to sleep. */
+     * can fire ext1 without a real press (ghost). Two chances to prove
+     * a human: (a) the early capture taken at the very top of app_main
+     * (catches short taps released before drivers init — boot latency
+     * is ~150-250 ms and a quick tap is 50-300 ms); (b) a re-sample
+     * over BUTTON_DEBOUNCE_MS now: >= 80 % low AND still low at the
+     * end. Ghost only when NEITHER saw the button. Residual limit:
+     * taps shorter than the boot latency that ALSO missed the early
+     * capture are undetectable without an RTC wake stub — bench item. */
     const gpio_config_t btn = {
         .pin_bit_mask = 1ULL << PIN_BUTTON,
         .mode = GPIO_MODE_INPUT,
@@ -156,9 +169,34 @@ pwr_boot_cause_t power_boot_cause(void)
     }
     const bool held = (low >= (BUTTON_DEBOUNCE_MS * 8) / 10) &&
                       (gpio_get_level(PIN_BUTTON) == 0);
-    ESP_LOGI(TAG, "ext1 wake: %d/%d samples low -> %s", low,
-             BUTTON_DEBOUNCE_MS, held ? "button" : "ghost");
-    return held ? PWR_BOOT_BUTTON : PWR_BOOT_GHOST;
+    ESP_LOGI(TAG, "ext1 wake: early=%d, %d/%d samples low -> %s",
+             (int)s_early_saw_low, low, BUTTON_DEBOUNCE_MS,
+             (held || s_early_saw_low) ? "button" : "ghost");
+    return (held || s_early_saw_low) ? PWR_BOOT_BUTTON : PWR_BOOT_GHOST;
+}
+
+void power_early_wake_capture(void)
+{
+    /* FIRST statement of app_main. On an ext1 wake the pad still
+     * carries the HOLD-latched LP pull-up, so a plain level read works
+     * before any driver init (digital IO mux reset state reads the pad
+     * through the input path; no gpio_config needed for a read). 64
+     * samples / 50 us apart ≈ 3.2 ms: TVS/C22 ringing decays in well
+     * under 1 ms, so >= 60 % low means a finger, not a transient. */
+    if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_EXT1) {
+        return;
+    }
+    int low = 0;
+    for (int i = 0; i < 64; i++) {
+        low += (gpio_get_level(PIN_BUTTON) == 0);
+        esp_rom_delay_us(50);
+    }
+    s_early_saw_low = (low >= 38);   /* 60 % of 64 */
+}
+
+bool power_last_off_battery_forced(void)
+{
+    return s_off_batt_forced;
 }
 
 void power_apply_state(nc_sys_state_t state, bool usb_present)
@@ -236,6 +274,18 @@ void power_enter_off(bool battery_forced)
      *    survives — see file header for the verified v5.5.1 mechanism. */
     rtc_gpio_pulldown_dis(PIN_BUTTON);
     rtc_gpio_pullup_en(PIN_BUTTON);
+
+    /* 5b. Disarm any stale light-sleep GPIO wake left by button.c
+     *     (gpio_wakeup_enable): a latched RTC_GPIO_TRIG_EN would decode
+     *     the wake as WAKEUP_GPIO instead of EXT1 (bypassing the ghost
+     *     check) AND force RTC_PERIPH on, breaking the HOLD-latch
+     *     low-power recipe. Must precede esp_deep_sleep_start. */
+    gpio_wakeup_disable(PIN_BUTTON);
+    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
+
+    /* Remember why we slept: a ghost wake must re-sleep with the SAME
+     * policy, or a battery-forced OFF loses its 12 h recheck forever. */
+    s_off_batt_forced = battery_forced;
 
     /* 6. Wake sources: button low via ext1 (GPIO2 is LP IO 0..7);
      *    battery-forced OFF adds a 12 h recheck so a recovering cell is

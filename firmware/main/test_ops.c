@@ -83,7 +83,10 @@ static nc_rate_t s_bench_rate;
 
 static esp_err_t ensure_bench_afe(nc_rate_t rate)
 {
-    if (!s_bench_up) {
+    /* The cache alone goes stale when anything else powers the AFE
+     * down (sys selftest, acq stop, OTA validator) — consult the
+     * driver's live up-flag so bench ops self-heal with a re-init. */
+    if (!s_bench_up || !afe4404_is_up()) {
         esp_err_t err = afe4404_init(rate);
         if (err != ESP_OK) {
             return err;

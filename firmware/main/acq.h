@@ -32,6 +32,11 @@ void acq_set_blank_until(uint64_t t_us);
  * OR-ed into every outgoing PPG batch's flags field. */
 void acq_set_extra_ppg_flags(uint8_t set_mask, uint8_t clear_mask);
 
+/* Selftest support: re-register the streaming ADC_RDY ISR after selftest
+ * released the pin (its detach must NOT leave the pin handler-less, or
+ * PPG never streams again until reboot). Sys-task context only. */
+esp_err_t acq_afe_rdy_isr_restore(void);
+
 /* Console raw-sample tap: arm captures the next n frames (dsp_task fills
  * a small ring); read drains them. Single consumer (console). */
 void acq_tap_arm(uint16_t n);

@@ -5,6 +5,7 @@
 #include <string.h>
 #include "narbis/nc_dsp.h"
 #include "narbis/nc_knobs.h"
+#include "narbis/nc_dsp_design.h"
 
 /* Generated tables: nc_dsp_bp_sos, nc_dsp_notch50/60(+_valid),
  * nc_dsp_dc_alpha_q31. Regenerate with tools/goldens/gen_dsp_coeffs.py. */
@@ -35,6 +36,28 @@ void nc_dsp_init(nc_chan_dsp_t *d, nc_rate_t rate)
     d->alpha_q31 = nc_dsp_dc_alpha_q31[rate];
     d->bq_c[0] = nc_dsp_bp_sos[rate][0];
     d->bq_c[1] = nc_dsp_bp_sos[rate][1];
+
+    /* Non-default corner knobs (NC_KF_RESTREAM) re-design on this slow
+     * path; at the defaults the golden tables above stay verbatim (the
+     * bit-exactness contract with the committed vectors). A degenerate
+     * or unstable request keeps the defaults — never a broken filter. */
+    {
+        const uint16_t fs = nc_rate_sps(rate);
+        const int32_t hp_fc = nc_knob_get(KNOB_HP_FC_X100);
+        const int32_t lo = nc_knob_get(KNOB_BP_LO_X100);
+        const int32_t hi = nc_knob_get(KNOB_BP_HI_X100);
+        if (hp_fc != nc_knob_desc(KNOB_HP_FC_X100)->def) {
+            d->alpha_q31 = nc_dsp_design_alpha_q31(fs, (uint16_t)hp_fc);
+        }
+        if (lo != nc_knob_desc(KNOB_BP_LO_X100)->def ||
+            hi != nc_knob_desc(KNOB_BP_HI_X100)->def) {
+            nc_bq_coeff_t sec[2];
+            if (nc_dsp_design_bp(fs, (uint16_t)lo, (uint16_t)hi, sec)) {
+                d->bq_c[0] = sec[0];
+                d->bq_c[1] = sec[1];
+            }
+        }
+    }
 
     /* notch_hz knob range is 50..60; anything >= 55 selects the 60 Hz
      * design, else 50 Hz. The _valid tables already encode the

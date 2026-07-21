@@ -11,6 +11,16 @@
 esp_err_t power_init(void);   /* pm config (DFS + tickless), wake cause decode */
 
 /* Why did we boot? (wraps esp_sleep_get_wakeup_cause + reset reason) */
+/* Call as the VERY FIRST statement of app_main: on an ext1 wake it
+ * burst-samples the button for ~3 ms so short taps released before the
+ * (150-250 ms later) full recheck still classify as BUTTON, not GHOST. */
+void power_early_wake_capture(void);
+
+/* Policy of the previous power_enter_off (RTC-retained): a ghost wake
+ * re-sleeps with the SAME battery_forced flag so the 12 h recheck
+ * timer of a battery-forced OFF is never dropped. */
+bool power_last_off_battery_forced(void);
+
 typedef enum {
     PWR_BOOT_COLD,        /* power-on / flash                          */
     PWR_BOOT_BUTTON,      /* ext1 wake, press confirmed after debounce */

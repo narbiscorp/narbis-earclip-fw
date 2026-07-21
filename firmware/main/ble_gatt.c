@@ -661,6 +661,11 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
             return 0;
         }
         clear_link_state();
+        /* Defense-in-depth against the drain/disconnect race: any
+         * packet still staged from the previous session must not leak
+         * into this one. Flush BEFORE the handle goes live so the
+         * drain task cannot start serving the new connection first. */
+        ble_tx_flush_all();
         s_conn = event->connect.conn_handle;
         s_peer_was_bonded = peer_is_bonded(s_conn);
         s_mtu = ble_att_mtu(s_conn);
@@ -958,6 +963,23 @@ void ble_shutdown(void)
 bool ble_is_connected(void)
 {
     return s_conn != BLE_HS_CONN_HANDLE_NONE;
+}
+
+uint16_t ble_att_payload_budget(void)
+{
+    /* Producers of large stream packets clamp their batch fill to this.
+     * MTU-3 is the notification payload ceiling; NimBLE silently
+     * truncates anything bigger. Disconnected -> full budget (batches
+     * are rebuilt per-connection and the MTU event lands before any
+     * subscription). If the peer never exchanges MTU, 23-3 = 20 holds. */
+    uint16_t c = s_conn;
+    if (c == BLE_HS_CONN_HANDLE_NONE) {
+        return NC_ATT_PAYLOAD_MAX;
+    }
+    uint16_t m = s_mtu;
+    uint16_t budget = (m > 3) ? (uint16_t)(m - 3) : 20;
+    if (budget < 20) budget = 20;
+    return (budget < NC_ATT_PAYLOAD_MAX) ? budget : NC_ATT_PAYLOAD_MAX;
 }
 
 void ble_get_conn_stats(uint16_t *mtu, uint8_t *phy, uint16_t *interval_1_25ms)

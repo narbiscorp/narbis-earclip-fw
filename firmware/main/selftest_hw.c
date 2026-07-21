@@ -134,8 +134,13 @@ static esp_err_t rdy_isr_attach(void)
 
 static void rdy_isr_detach(void)
 {
+    /* Hand the pin BACK to the streaming ISR — a bare handler_remove
+     * would leave PPG dead until reboot (acq_afe owns the pin). */
     gpio_isr_handler_remove(PIN_ADC_RDY);
-    gpio_intr_disable(PIN_ADC_RDY);
+    esp_err_t err = acq_afe_rdy_isr_restore();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "ADC_RDY ISR restore failed: %s", esp_err_to_name(err));
+    }
 }
 
 /* Per-frame stats accumulator for one capture run. */

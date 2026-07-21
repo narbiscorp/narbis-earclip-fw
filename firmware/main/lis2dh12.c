@@ -114,6 +114,13 @@ esp_err_t lis2dh12_init(void)
                       "fault, check R-strap / solder bridge", addr);
     }
 
+    /* Re-init (selftest, post-OTA validation) must not leak the old
+     * handle — and the strap-fault fallback may resolve a DIFFERENT
+     * address than last time, so remove-then-add rather than reuse. */
+    if (s_dev != NULL) {
+        i2c_master_bus_rm_device(s_dev);
+        s_dev = NULL;
+    }
     err = i2c_bus_add_device(addr, I2C_FREQ_HZ, &s_dev);
     if (err != ESP_OK) {
         return err;

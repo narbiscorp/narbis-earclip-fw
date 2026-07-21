@@ -80,6 +80,8 @@ static nc_agc_t s_agc;
 static int8_t s_offdac[2];             /* shadow, see file header       */
 static bool s_prev_gated;
 static bool s_prev_worn;
+static bool s_wear_reported;   /* one-shot: never-worn case reported     */
+static uint32_t s_notworn_s;   /* consecutive not-worn 1 Hz ticks        */
 
 static nc_rate_t s_rate = NC_RATE_100;
 static uint16_t s_sps = 100;
@@ -247,6 +249,8 @@ static void dsp_apply_reset(uint32_t req)
 
         nc_wear_init(&s_wear);
         s_prev_worn = nc_wear_is_worn(&s_wear);
+        s_wear_reported = false;
+        s_notworn_s = 0;
 
         memset(s_duty_gated, 0, sizeof(s_duty_gated));
         memset(s_duty_total, 0, sizeof(s_duty_total));
@@ -369,8 +373,18 @@ static void one_hz_tick(void)
     bool worn = nc_wear_is_worn(&s_wear);
     if (worn != s_prev_worn) {
         s_prev_worn = worn;
+        s_wear_reported = true;
         sys_msg_t m = { .type = SYS_WEAR_CHANGED, .u.flag = worn };
         (void)sys_post(&m);   /* sys_task owns the EVENT + policy side */
+    } else if (!s_wear_reported && !worn &&
+               ++s_notworn_s >= (uint32_t)nc_knob_get(KNOB_WEAR_OFF_S)) {
+        /* Never-worn handshake: sys_task boots with an optimistic
+         * s_worn=true; without a transition it would stream LEDs
+         * forever and never arm off-ear auto-sleep. Report the
+         * sustained not-worn state once. */
+        s_wear_reported = true;
+        sys_msg_t m = { .type = SYS_WEAR_CHANGED, .u.flag = false };
+        (void)sys_post(&m);
     }
 
     /* Gate duty, rolling 60 s. */
@@ -435,9 +449,9 @@ static void dsp_process(const nc_ppg_sample_t *s)
                                 &reason);
     if (gated != s_prev_gated) {
         s_prev_gated = gated;
-        g_diag.gate_transitions++;
-        uint8_t d[2] = { gated ? 1u : 0u, reason };
-        acq_event_post(NC_EV_GATE, d, sizeof(d));
+        /* sys_task is the single NC_EV_GATE emitter and the sole writer
+         * of g_diag.gate_transitions (app_msgs.h SYS_GATE_CHANGED
+         * contract + diag.h single-writer rule) — no local emission. */
         sys_msg_t m = { .type = SYS_GATE_CHANGED };
         m.u.gate.on = gated;
         m.u.gate.reason = reason;
