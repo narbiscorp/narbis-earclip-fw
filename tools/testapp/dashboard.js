@@ -200,8 +200,138 @@ const NarbisDashCore = (() => {
     }
   }
 
+  /* ---------------- ⓘ info dictionary ------------------------------ */
+  /* Plain-language definitions for every dashboard element. Keyed by
+   * anchor: {sel: where the ⓘ goes (appended inside), text}. Kept in
+   * core so selfcheck can lint completeness without a DOM. */
+  const INFO = {
+    "graph.ppg": { sel: '[data-graph="ppg"] .graph-title', text:
+      "The light received through the earlobe. IR and RED are the two LED " +
+      "channels; AMB is the ambient reading taken with both LEDs off (stray " +
+      "room light). The small ripples are your pulse — each heartbeat " +
+      "briefly changes how much blood, and therefore light, is in the lobe. " +
+      "A trace pinned flat at the top or bottom means the receiver is " +
+      "saturated: lower the LED current or the TIA gain." },
+    "graph.acc": { sel: '[data-graph="acc"] .graph-title', text:
+      "The motion sensor's three axes (X, Y, Z) plus |a|, the combined " +
+      "magnitude. A perfectly still board reads 1 g total — gravity — on " +
+      "whichever axis points down. Motion spikes here are what triggers " +
+      "the artifact gate." },
+    "graph.beat": { sel: '[data-graph="beat"] .graph-title', text:
+      "The device's on-board beat detection. The line is smoothed heart " +
+      "rate (bpm); each dot is one IBI — the inter-beat interval, the " +
+      "exact milliseconds between two heartbeats. No dots = no beats " +
+      "detected (nothing on the sensor, or the signal is gated)." },
+    "graph.batt": { sel: '[data-graph="batt"] .graph-title', text:
+      "Battery voltage across the whole session. A full LiPo cell is " +
+      "about 4.2 V, empty is 3.3 V. The reading is taken on the cell " +
+      "itself, so it stays honest while charging." },
+    "ro.batt": { sel: "#roBattV", after: true, text:
+      "Live battery voltage (3 decimals), estimated percentage, and the " +
+      "charger state: on-battery, charging (USB in, cell filling at " +
+      "50 mA), or complete. There is no current readout — the V2.1 board " +
+      "has no current-sense part; use a bench meter for that." },
+    "ro.btn": { sel: "#roBtn", after: true, text:
+      "Live state of the side button, straight from the firmware. In this " +
+      "functional-test firmware the button ONLY powers on (hold 1 s) and " +
+      "off (hold 5 s) — shorter presses do nothing except light this lamp, " +
+      "which is exactly how you verify the switch works." },
+    "ro.gatewear": { sel: "#roGate", after: true, text:
+      "GATE lights when the firmware flags the PPG as unreliable — motion, " +
+      "receiver saturation, or a sudden signal step. Data keeps streaming; " +
+      "only beat detection pauses. WEAR lights when the on-ear detector " +
+      "believes the clip is on skin (IR light level + pulse activity)." },
+    "ro.ver": { sel: "#roVer", after: true, text:
+      "Firmware version (from the build's git tag), hardware revision, " +
+      "BLE protocol version, and this app's version. Include these in any " +
+      "issue report." },
+    "ro.link": { sel: "#roLink", after: true, text:
+      "BLE link quality. Every stream packet carries a sequence number, " +
+      "so lost packets are countable: 'gaps' is packets the app never " +
+      "received; 'drops' is packets the device discarded because the link " +
+      "was too slow. 0 / 0 for a whole session is a clean link." },
+    "ro.ticker": { sel: "#dashTicker", before: true, text:
+      "Real-time event feed from the device: automatic gain steps, gate " +
+      "on/off spans, wear changes, button markers, errors. Every " +
+      "amplitude jump in the graphs should have a matching event here — " +
+      "that is how recordings stay interpretable." },
+    "ctl.ir": { sel: "#ledIr", before: true, text:
+      "Drive current for the infrared LED, 0–50 mA in ~0.8 mA steps. " +
+      "More current = more light through the lobe = bigger signal. " +
+      "Invisible to the eye — verify it with the PPG graph, not by " +
+      "looking. Touching this freezes the automatic gain control so " +
+      "your setting sticks." },
+    "ctl.red": { sel: "#ledRed", before: true, text:
+      "Drive current for the red LED, 0–40 mA (its safe limit is lower " +
+      "than IR's). You can see this one glow dimly — the glow check in " +
+      "the guided sequence uses it. Touching this freezes auto-gain." },
+    "ctl.tia": { sel: "#selTia", after: true, text:
+      "Receiver sensitivity. TIA = transimpedance amplifier, the stage " +
+      "that turns the photodiode's tiny current into a voltage; the ohm " +
+      "value is its gain (100 kΩ ⇒ 1 µA of light becomes 0.1 V). Raise " +
+      "it for weak signals, lower it if the trace clips. One setting is " +
+      "shared by IR, RED and AMB alike, so changing it re-scales the " +
+      "whole PPG graph at once." },
+    "ctl.rate": { sel: "#selRate", after: true, text:
+      "PPG samples per second: 50, 100, 200, 250 or 500. Each sample " +
+      "fires both LEDs once for ~100 µs, so this is also the LED pulse " +
+      "rate. Higher rates give finer beat timing at more power and BLE " +
+      "bandwidth. 100 sps is the product default." },
+    "ctl.odr": { sel: "#selOdr", after: true, text:
+      "Accelerometer ODR — Output Data Rate, its samples per second " +
+      "(10–400 Hz). Higher = finer motion detail, more BLE traffic. " +
+      "50 Hz is plenty for motion-artifact gating." },
+    "ctl.fs": { sel: "#selFs", after: true, text:
+      "Accelerometer full-scale range: the largest acceleration it can " +
+      "represent, ±2/4/8/16 g. Small range = finest resolution per " +
+      "count; big range = survives hard shocks but 8× coarser. ±4 g " +
+      "(default) covers vigorous head motion without clipping. 1 g is " +
+      "gravity — a resting board shows 1 g on the downward axis." },
+    "ctl.sweep": { sel: ".sweep-box legend", text:
+      "Runs the LEDs through a continuous test pattern in the firmware " +
+      "itself: ramp 0 → max over the phase time, hold at max, ramp back " +
+      "to 0, hold at 0, repeat until stopped. Pick either LED or both. " +
+      "Watch the PPG graph respond — a flat response means an open " +
+      "emitter or flex-cable fault. Sliders lock while sweeping." },
+    "ctl.stream": { sel: "#btnStream", after: true, text:
+      "Starts/stops the sensor streams (PPG + accel + beats + events). " +
+      "Sensors only run while streaming — LEDs off and radio quiet " +
+      "otherwise." },
+    "ctl.marker": { sel: "#btnMarker", after: true, text:
+      "Drops a timestamped marker into the event stream and any active " +
+      "recording — for tagging moments ('touched the sensor NOW') so " +
+      "they can be found in the data later." },
+    "ctl.selftest": { sel: "#btnSelftest", after: true, text:
+      "Runs the built-in hardware self-test: I²C bus scan, sensor " +
+      "identity checks, dark-noise and light-leak measurements, " +
+      "accelerometer self-test, battery and charger checks. Results " +
+      "appear below as a PASS/FAIL table." },
+    "ctl.sleep": { sel: "#btnDeepSleep", after: true, text:
+      "For the bench current measurement: 10 s after you confirm, the " +
+      "board enters deep sleep (target ≤ 80 µA at the cell — needs a " +
+      "meter in series with the battery). Wake it by holding the button " +
+      "1 s." },
+    "ctl.knobs": { sel: "#dashKnobsBox summary", text:
+      "Every tunable parameter in the firmware (62 of them), fetched " +
+      "live from the device — gain loops, filters, beat detection, " +
+      "gating, power thresholds. Edits apply immediately; SAVE persists " +
+      "them across reboots; RESET returns to factory defaults. If a " +
+      "value misbehaves, RESET is always safe." },
+    "rec.serial": { sel: "#recSerial", before: true, text:
+      "The board's serial number — stamped into the recording filename " +
+      "and the report card so every file traces to a physical unit." },
+    "rec.record": { sel: "#btnRecord", after: true, text:
+      "Captures everything while armed — every PPG and accel sample, " +
+      "every beat, status snapshot and event, plus the full session log — " +
+      "and downloads it as one .zip of CSV files when stopped." },
+    "log.session": { sel: "#dashLogDl", before: true, text:
+      "Verbose session log: every command this app sent, every reply, " +
+      "and the device's once-per-second status line. Download the full " +
+      "log with the button — attach it to any problem report." },
+  };
+
   return { makeRing, ringMinMax, autoRange, zoomStep, applyZoom, niceTicks,
-           gapCounter, csv, zipStore, fmtEvent };
+           gapCounter, csv, zipStore, fmtEvent, INFO };
 })();
 
 if (typeof module !== "undefined" && module.exports) {
@@ -557,9 +687,12 @@ if (typeof document !== "undefined" && document.getElementById("dashPane"))
 
   /* ---------------- connection-sensitive UI ---------------- */
   function connected() { return !!(S.server && S.server.connected); }
+  /* The guided sequence owns the device while it runs — dashboard
+   * mutations mid-step would corrupt it (e.g. streaming makes 0xE2
+   * refuse). Graphs/readouts stay live; controls lock. */
   let lastConn = null;
   function syncConnUi() {
-    const c = connected();
+    const c = connected() && !A.onGuidedBusy();
     if (c === lastConn) return;
     lastConn = c;
     for (const id of ["btnStream", "btnMarker", "btnSelftest", "btnDeepSleep",
@@ -732,7 +865,9 @@ if (typeof document !== "undefined" && document.getElementById("dashPane"))
         S.taps.event.add(tap);
         setTimeout(() => { S.taps.event.delete(tap); res(); }, 4000);
       });
-      await A.ctrl("selftestRun", [0]);
+      /* real firmware blocks sys_task ~4.5 s for the full mask — the
+       * CONTROL indication arrives only after it finishes */
+      await A.ctrl("selftestRun", [0], { timeoutMs: 20000 });
       await done;
       const blob = await A.fetchBlob("selftestResult");
       const st = NP.parseSelftestBlob(blob);
@@ -903,6 +1038,62 @@ if (typeof document !== "undefined" && document.getElementById("dashPane"))
                  `narbis_functest_${serial}_${tsName()}.zip`);
     $("recInfo").textContent = "saved";
   };
+
+  /* ---------------- ⓘ info buttons + popover ----------------------- */
+  function installInfo() {
+    const pop = document.createElement("div");
+    pop.id = "infoPop";
+    pop.className = "hidden";
+    document.body.appendChild(pop);
+    let openFor = null;
+
+    function close() {
+      pop.classList.add("hidden");
+      openFor = null;
+    }
+    function openAt(btn, text) {
+      pop.textContent = text;
+      pop.classList.remove("hidden");
+      const r = btn.getBoundingClientRect();
+      const w = Math.min(340, window.innerWidth - 24);
+      pop.style.width = w + "px";
+      let x = r.left + window.scrollX;
+      if (x + w > window.scrollX + window.innerWidth - 12) {
+        x = window.scrollX + window.innerWidth - w - 12;
+      }
+      pop.style.left = x + "px";
+      pop.style.top = (r.bottom + window.scrollY + 6) + "px";
+      openFor = btn;
+    }
+
+    for (const [key, def] of Object.entries(C.INFO)) {
+      const anchor = document.querySelector(def.sel);
+      if (!anchor) continue;   /* markup drift: skip, never break the app */
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "info-dot";
+      btn.textContent = "ⓘ";
+      btn.setAttribute("aria-label", "what is this?");
+      btn.dataset.infoKey = key;
+      btn.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();   /* keep <summary>/<label> from toggling */
+        if (openFor === btn) close();
+        else openAt(btn, def.text);
+      };
+      if (def.before) anchor.parentNode.insertBefore(btn, anchor);
+      else if (def.after) anchor.parentNode.insertBefore(btn, anchor.nextSibling);
+      else anchor.appendChild(btn);
+    }
+    document.addEventListener("click", (e) => {
+      if (!pop.classList.contains("hidden") &&
+          e.target !== pop && !pop.contains(e.target)) close();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") close();
+    });
+  }
+  installInfo();
 
   syncConnUi();
 })();

@@ -124,7 +124,7 @@ const NarbisMock = (() => {
       this._ppgSeq = 0; this._accelSeq = 0; this._eventSeq = 0;
       this._ibiSeq = 0;
       this._buttonEcho = false;
-      this._chargerLive = false;
+      this._chargerT0 = null;          /* device-us of first 0xE6 poll  */
       this._accelLive = false;
       this._chargerFlags = 0;          /* STF bits reflected in STATUS */
       /* live front-end state (STATUS + PPG DC respond to these) */
@@ -146,12 +146,10 @@ const NarbisMock = (() => {
       this._ota = { state: P.OTA_IDLE, size: 0, crc: 0, rx: 0, run: 0,
                     lastErr: P.OTAERR_NONE };
       this._selftestRan = [];          /* records accumulated since boot */
-      this._report = {
-        device: MOCK_NAME,
-        serial: "MOCK-0001",
-        hw: "V2.1",
-        tests: {},
-      };
+      /* firmware truth (test_ops.c): ONE static sweep report, binary
+       * blob ver 2, overwritten by each 0xE2/0xE3; 0xEA serves it (or
+       * falls back to the selftest blob when no sweep has run). */
+      this._sweepBlob = null;
     }
 
     /* ---- characteristic registry ---- */
@@ -174,7 +172,8 @@ const NarbisMock = (() => {
       for (const id of this._timers) clearTimeout(id);
       this._timers.clear();
       this._streamMask = 0;
-      this._buttonEcho = this._chargerLive = this._accelLive = false;
+      this._buttonEcho = this._accelLive = false;
+      this._chargerT0 = null;
       this._emit("gattserverdisconnected", { fromDevice });
     }
 
@@ -431,6 +430,8 @@ const NarbisMock = (() => {
           const rec = this._selftestRecord(pl[0]);
           if (!rec) return this._respond(op, tid, P.ST_BAD_PARAM);
           this._selftestRan.push(rec);
+          this._sweepBlob = null;  /* firmware: selftest_execute clears the
+                                      external (sweep) blob */
           const out = new DataView(new ArrayBuffer(P.ST_REC_SIZE));
           out.setUint8(0, rec.id); out.setUint8(1, rec.status);
           out.setInt32(2, rec.value, true); out.setInt32(6, rec.threshold, true);
@@ -443,53 +444,79 @@ const NarbisMock = (() => {
           return ok(); /* the red die glows in our imagination */
         }
         case P.OP_TEST_LED_SWEEP: {
+          /* firmware: blocks sys ctx ~200 ms/point, publishes the binary
+           * v2 blob (this sweep only), responds {u8 n, u16 blob_len} */
           const led = pl[0], step = Math.max(1, pl[1]);
-          const key = led === 1 ? "led_sweep_red" : "led_sweep_ir";
           const maMax = led === 1 ? 40 : 50;
-          const maArr = [], dcArr = [];
+          const pts = [];
           for (let ma = 0; ma <= maMax; ma += step) {
-            maArr.push(ma);
             /* saturating exponential + supply-sag compression + noise */
             const span = led === 1 ? 30000 : 45000;
             const tau = led === 1 ? 18 : 25;
-            const dc = span * (1 - Math.exp(-ma / tau)) +
-                       (this._rand() - 0.5) * 220;
-            dcArr.push(Math.max(0, Math.round(dc)));
+            const amb = 900 + Math.round((this._rand() - 0.5) * 60);
+            const dc = Math.max(0, Math.round(
+              span * (1 - Math.exp(-ma / tau)) + (this._rand() - 0.5) * 220));
+            /* the swept LED's channel carries the signal; the other
+             * channel idles near ambient */
+            pts.push({
+              setting: ma,
+              ir: led === 0 ? dc + amb : amb + Math.round(this._rand() * 40),
+              red: led === 1 ? dc + amb : amb + Math.round(this._rand() * 40),
+              amb,
+            });
           }
-          this._report.tests[key] = { ma: maArr, dc: dcArr };
-          return this._after(200, () => this._respond(op, tid, P.ST_OK));
+          const blob = this._buildSweepBlob(1, led, pts);
+          return this._after(200 * pts.length / 10, () => {
+            this._sweepBlob = blob;
+            const resp = new Uint8Array(3);
+            resp[0] = pts.length;
+            new DataView(resp.buffer).setUint16(1, blob.length, true);
+            this._respond(op, tid, P.ST_OK, resp);
+          });
         }
         case P.OP_TEST_RX_SWEEP: {
           const what = pl[0];
+          const RF_OHMS = [5e5, 2.5e5, 1e5, 5e4, 2.5e4, 1e4, 1e6, 2e6];
+          const pts = [];
           if (what === 0) {
-            const code = [], dc = [];
+            /* fixed 20 mA IR drive: dc tracks RF ohms — and the code
+             * ladder is NON-monotonic, exactly like hardware */
             for (let c = 0; c <= 7; c++) {
-              code.push(c);
-              dc.push(Math.min(2000000, Math.round(
-                7900 * (1 << c) * (1 + (this._rand() - 0.5) * 0.04))));
+              const amb = 900 + Math.round((this._rand() - 0.5) * 60);
+              const dc = Math.min(4194303, Math.round(
+                0.79 * RF_OHMS[c] * (1 + (this._rand() - 0.5) * 0.04)));
+              pts.push({ setting: c, ir: dc + amb,
+                         red: amb + Math.round(this._rand() * 40), amb });
             }
-            this._report.tests.rx_sweep_gain = { code, dc };
           } else {
-            const code = [], dc = [];
-            for (let c = -7; c <= 7; c++) {
-              code.push(c);
-              dc.push(Math.round(210000 + c * 29500 + (this._rand() - 0.5) * 400));
+            for (let c = -15; c <= 15; c++) {
+              const amb = 900 + Math.round((this._rand() - 0.5) * 60);
+              pts.push({ setting: c,
+                         ir: Math.round(210000 + c * 13500 +
+                                        (this._rand() - 0.5) * 400),
+                         red: amb + Math.round(this._rand() * 40), amb });
             }
-            this._report.tests.rx_sweep_dac = { code, dc };
           }
-          return this._after(150, () => this._respond(op, tid, P.ST_OK));
+          const blob = this._buildSweepBlob(2, what, pts);
+          return this._after(150, () => {
+            this._sweepBlob = blob;
+            const resp = new Uint8Array(3);
+            resp[0] = pts.length;
+            new DataView(resp.buffer).setUint16(1, blob.length, true);
+            this._respond(op, tid, P.ST_OK, resp);
+          });
         }
         case P.OP_TEST_RATE_COUNT: {
-          const seconds = pl[0] || 10;
-          ok(); /* immediate ack; result rides a second indication, same tid */
+          /* firmware deviation from the old README note: SYNCHRONOUS —
+           * sys_task blocks for the window, the single response IS the
+           * completion (payload {u32 pulses, u32 elapsed_ms}) */
+          const seconds = Math.min(30, Math.max(1, pl[0] || 1));
           this._after(seconds * 1000, () => {
             const nominal = P.RATE_SPS[this._rate];
             const pulses = Math.round(nominal * seconds * 0.9995);
             const out = new DataView(new ArrayBuffer(8));
             out.setUint32(0, pulses, true);
             out.setUint32(4, seconds * 1000 + 3, true);
-            this._report.tests.rate_count =
-              { pulses, elapsed_ms: seconds * 1000 + 3 };
             this._respond(op, tid, P.ST_OK, new Uint8Array(out.buffer));
           });
           return;
@@ -498,15 +525,30 @@ const NarbisMock = (() => {
           this._buttonEcho = !!pl[0];
           if (this._buttonEcho) this._scriptButtonPresses();
           return ok();
-        case P.OP_TEST_CHARGER_LIVE:
-          this._chargerLive = !!pl[0];
-          if (this._chargerLive) this._scriptChargerWalk();
-          return ok();
+        case P.OP_TEST_CHARGER_LIVE: {
+          /* firmware: stateless POLLED snapshot {u8 vusb, u8 stat_raw,
+           * u8 decoded_state}; the enable byte is accepted and ignored.
+           * Walk battery -> charging -> complete -> battery on poll time.
+           * STAT physics per T08: unpowered MCP73831 + divider reads 0
+           * on battery; charging = 0; complete = 1. */
+          if (pl.length > 1) return this._respond(op, tid, P.ST_BAD_LEN);
+          if (this._chargerT0 === null) this._chargerT0 = this._devUs();
+          const tS = (this._devUs() - this._chargerT0) / 1e6;
+          let vusb, stat, st;
+          if (tS < 2) { vusb = 0; stat = 0; st = P.CHG_ON_BATTERY; }
+          else if (tS < 5) { vusb = 1; stat = 0; st = P.CHG_CHARGING; }
+          else if (tS < 7) { vusb = 1; stat = 1; st = P.CHG_COMPLETE; }
+          else { vusb = 0; stat = 0; st = P.CHG_ON_BATTERY; }
+          this._chargerFlags =
+            (st === P.CHG_CHARGING ? P.STF_CHARGING : 0) |
+            (st === P.CHG_COMPLETE ? P.STF_CHARGE_DONE : 0) |
+            (vusb ? P.STF_USB : 0);
+          return ok(Uint8Array.of(vusb, stat, st));
+        }
         case P.OP_TEST_BATT_RAW: {
           const out = new DataView(new ArrayBuffer(4));
           out.setUint16(0, 3921, true);   /* calibrated mV */
           out.setUint16(2, 1943, true);   /* raw ADC average */
-          this._report.tests.batt_raw = { mv_cal: 3921, adc_raw: 1943 };
           return ok(new Uint8Array(out.buffer));
         }
         case P.OP_TEST_ACCEL_LIVE:
@@ -539,8 +581,14 @@ const NarbisMock = (() => {
           /* firmware sleeps in 10 s; link drops when it does */
           this._after(10000, () => this._disconnect(true));
           return;
-        case P.OP_TEST_REPORT:
-          return ok(this._chunkOf(this._reportBlob(), pl[0] | (pl[1] << 8)));
+        case P.OP_TEST_REPORT: {
+          /* firmware: chunker over the current blob — the sweep blob if
+           * one was published, else the selftest blob; none -> WRONG_STATE */
+          const blob = this._sweepBlob ||
+            (this._selftestRan.length ? this._selftestBlob() : null);
+          if (!blob) return this._respond(op, tid, P.ST_WRONG_STATE);
+          return ok(this._chunkOf(blob, pl[0] | (pl[1] << 8)));
+        }
 
         default:
           return this._respond(op, tid, P.ST_UNKNOWN_OP);
@@ -580,14 +628,21 @@ const NarbisMock = (() => {
       return new Uint8Array(out.buffer);
     }
 
-    /* Consolidated TEST report: UTF-8 JSON blob (see README interface
-     * note — firmware's "JSON-ish TLV" must serialize to this shape). */
-    _reportBlob() {
-      return new TextEncoder().encode(JSON.stringify({
-        ...this._report,
-        selftest: this._selftestRan,
-        t_us: this._devUs(),
-      }));
+    /* Binary sweep report, firmware layout (test_ops.c blob ver 2):
+     * [u8 2][u8 kind][u8 param][u8 n][n x {u8 setting, i32 ir, i32 red,
+     * i32 amb}] little-endian. Negative DAC settings cast to u8. */
+    _buildSweepBlob(kind, param, pts) {
+      const out = new Uint8Array(4 + pts.length * 13);
+      const d = new DataView(out.buffer);
+      out[0] = 2; out[1] = kind; out[2] = param; out[3] = pts.length;
+      pts.forEach((p, i) => {
+        const off = 4 + i * 13;
+        d.setUint8(off, p.setting & 0xFF);
+        d.setInt32(off + 1, p.ir, true);
+        d.setInt32(off + 5, p.red, true);
+        d.setInt32(off + 9, p.amb, true);
+      });
+      return out;
     }
 
     _chunkOf(blob, offset) {
@@ -708,17 +763,6 @@ const NarbisMock = (() => {
       d.setUint8(10, passN); d.setUint8(11, failN);
       return rec;
     }
-    /* Charger snapshot event: type == OP_TEST_CHARGER_LIVE (0xE6), payload
-     * {u64 t_us, u8 vusb, u8 stat_raw, u8 chg_state} — the TEST-mode
-     * interface assumption documented in the README. */
-    _chargerRecord(vusb, statRaw, chgState, tUs) {
-      const rec = new Uint8Array(2 + 11);
-      const d = new DataView(rec.buffer);
-      rec[0] = P.OP_TEST_CHARGER_LIVE; rec[1] = 11;
-      d.setBigUint64(2, BigInt(tUs === undefined ? this._devUs() : tUs), true);
-      d.setUint8(10, vusb); d.setUint8(11, statRaw); d.setUint8(12, chgState);
-      return rec;
-    }
     _pushEvent(...records) {
       let len = 0;
       for (const r of records) len += r.length;
@@ -738,14 +782,15 @@ const NarbisMock = (() => {
      * matter how the timers are coalesced. */
 
     _scriptButtonPresses() {
-      /* 5 presses: down edge (marker_id = press<<1|1), up edge 120 ms
-       * later (marker_id = press<<1), presses spaced 700 ms. */
+      /* 5 presses. Firmware (test_ops.c btn_poll_cb): marker_id =
+       * 1000 + level — press (active-low, level 0) = 1000, release =
+       * 1001. Down edge, up edge 120 ms later, presses spaced 700 ms. */
       const t0 = this._devUs();
       const edges = [];
       for (let press = 1; press <= 5; press++) {
         const base = 600 + (press - 1) * 700;
-        edges.push([t0 + base * 1000, (press << 1) | 1]);
-        edges.push([t0 + (base + 120) * 1000, press << 1]);
+        edges.push([t0 + base * 1000, 1000]);
+        edges.push([t0 + (base + 120) * 1000, 1001]);
       }
       let i = 0;
       const tick = () => {
@@ -759,35 +804,6 @@ const NarbisMock = (() => {
         this._after(40, tick);
       };
       this._after(40, tick);
-    }
-
-    _scriptChargerWalk() {
-      /* 2 Hz snapshots: 4 on-battery -> operator "plugs in" -> 6 charging ->
-       * 4 complete -> "unplug" -> 4 on-battery. STAT raw bit: on this mock,
-       * LOW while charging (the polarity question the bench resolves). */
-      const script = [];
-      for (let i = 0; i < 4; i++) script.push([0, 1, P.CHG_ON_BATTERY]);
-      for (let i = 0; i < 6; i++) script.push([1, 0, P.CHG_CHARGING]);
-      for (let i = 0; i < 4; i++) script.push([1, 1, P.CHG_COMPLETE]);
-      for (let i = 0; i < 4; i++) script.push([0, 1, P.CHG_ON_BATTERY]);
-      const t0 = this._devUs();
-      let i = 0;
-      const tick = () => {
-        if (!this._connected || !this._chargerLive || i >= script.length) return;
-        const now = this._devUs();
-        while (i < script.length && t0 + 500000 * (i + 1) <= now) {
-          const [vusb, stat, state] = script[i];
-          this._chargerFlags =
-            (state === P.CHG_CHARGING ? P.STF_CHARGING : 0) |
-            (state === P.CHG_COMPLETE ? P.STF_CHARGE_DONE : 0) |
-            (vusb ? P.STF_USB : 0);
-          this._pushEvent(this._chargerRecord(vusb, stat, state,
-                                              t0 + 500000 * (i + 1)));
-          i++;
-        }
-        this._after(100, tick);
-      };
-      this._after(100, tick);
     }
 
     /* ---- PPG stream (schedule-driven, catch-up per tick) ---- */

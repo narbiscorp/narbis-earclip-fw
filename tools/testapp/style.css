@@ -12,6 +12,7 @@
   --pass: #38c172;
   --fail: #e3574b;
   --skip: #b0a24a;
+  --info: #4da3ff;   /* informational optical steps (recorded, not gated) */
   --warn: #e0a63c;
   --ir: #e07840;
   --red: #e34d6a;
@@ -172,6 +173,9 @@ input[type="number"], input[type="text"] {
 .st-ico.pass { background: var(--pass); color: #06210f; }
 .st-ico.fail { background: var(--fail); color: #2b0906; }
 .st-ico.skip { background: var(--skip); color: #241f04; }
+.st-ico.info { background: var(--info); color: #06121f; }
+#checklist li.rerunnable { cursor: pointer; }
+#checklist li.rerunnable:hover { background: #1a2432; }
 
 .st-name { font-size: 13px; }
 .st-name .mode {
@@ -189,6 +193,7 @@ input[type="number"], input[type="text"] {
 }
 .st-val.pass { color: var(--pass); }
 .st-val.fail { color: var(--fail); }
+.st-val.info { color: var(--info); }
 
 /* ---------------- live panel ---------------- */
 
@@ -217,6 +222,7 @@ input[type="number"], input[type="text"] {
 }
 .readout .pass { color: var(--pass); }
 .readout .fail { color: var(--fail); }
+.readout .info { color: var(--info); }
 
 #liveCanvas {
   width: 100%;
@@ -289,6 +295,7 @@ footer#reportPane { margin: 0 14px 14px; }
 #reportTable td.r-pass { color: var(--pass); font-weight: 700; }
 #reportTable td.r-fail { color: var(--fail); font-weight: 700; }
 #reportTable td.r-skip { color: var(--skip); font-weight: 700; }
+#reportTable td.r-info { color: var(--info); font-weight: 700; }
 #reportTable td.val { font-family: var(--mono); font-size: 12px; }
 
 /* ---------------- tab bar ---------------- */
@@ -493,4 +500,41 @@ footer#reportPane { margin: 0 14px 14px; }
   #reportTable td.r-pass { color: #0a7a3c; }
   #reportTable td.r-fail { color: #b3261e; }
   #reportTable td.r-skip { color: #7a6c14; }
+  #reportTable td.r-info { color: #155e9e; }
 }
+
+/* ---------------- dashboard ⓘ info system ---------------- */
+
+.info-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-left: 5px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  vertical-align: middle;
+}
+.info-dot:hover { color: var(--accent, #3b82f6); }
+
+#infoPop {
+  position: absolute;
+  z-index: 50;
+  background: var(--pane);
+  border: 1px solid var(--accent, #3b82f6);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text, inherit);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, .45);
+}
+#infoPop.hidden { display: none; }
+@media print { .info-dot, #infoPop { display: none !important; } }

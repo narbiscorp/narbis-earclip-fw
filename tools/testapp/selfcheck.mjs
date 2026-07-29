@@ -201,25 +201,54 @@ ok((await ctrl("testLedDrive", [1, 20, 3000])).status === P.ST_OK, "LED drive ok
 ok((await ctrl("testLedDrive", [1, 45, 100])).status === P.ST_OUT_OF_RANGE,
    "red 45 mA rejected (abs-max 40)");
 
-/* step 7: LED sweeps -> report -> monotonic verdicts */
+/* step 7: LED sweeps — firmware binary v2 blob holds only the LAST
+ * sweep: run 0xE2, fetch 0xEA, repeat (the app.js flow) */
+async function sweepFetch() {
+  return A.parseSweepBlob(await fetchBlob("testReport"));
+}
 await ctrl("testLedSweep", [0, 2], { timeoutMs: 8000 });
+const swIr = await sweepFetch();
+ok(swIr.ver === 2 && swIr.kind === 1 && swIr.param === 0,
+   "IR sweep blob ver/kind/param");
 await ctrl("testLedSweep", [1, 2], { timeoutMs: 8000 });
-/* step 8: RX sweeps */
-await ctrl("testRxSweep", [0]);
-await ctrl("testRxSweep", [1]);
-const report = JSON.parse(new TextDecoder().decode(await fetchBlob("testReport")));
-ok(report.tests.led_sweep_ir && report.tests.led_sweep_red, "report has LED sweeps");
-const vIr = A.sweepVerdict(report.tests.led_sweep_ir.dc);
-const vRed = A.sweepVerdict(report.tests.led_sweep_red.dc);
+const swRed = await sweepFetch();
+ok(swRed.kind === 1 && swRed.param === 1,
+   "RED sweep blob overwrote the IR one (single static report)");
+const vIr = A.sweepVerdict(swIr.points.map((p) => p.ir - p.amb));
+const vRed = A.sweepVerdict(swRed.points.map((p) => p.red - p.amb));
 ok(vIr.pass && vRed.pass, `LED sweeps monotonic (IR span ${vIr.span})`);
-const vGain = A.sweepVerdict(report.tests.rx_sweep_gain.dc, { minRisingFrac: 0.85 });
-ok(vGain.pass, "RX gain sweep monotonic");
+/* step 8: RX sweeps — gain codes are NON-monotonic in ohms; the plain
+ * code-order verdict must fail and the ohm-ordered one must pass */
+await ctrl("testRxSweep", [0]);
+const swGain = await sweepFetch();
+ok(swGain.kind === 2 && swGain.param === 0, "gain sweep blob kind/param");
+const gainCodes = swGain.points.map((p) => p.setting);
+const gainDc = swGain.points.map((p) => p.ir - p.amb);
+ok(!A.sweepVerdict(gainDc, { minRisingFrac: 0.85 }).pass,
+   "code-order gain check fails on hardware-true RF ladder (regression)");
+ok(A.gainSweepVerdict(gainCodes, gainDc, { minRisingFrac: 0.85 }).pass,
+   "ohm-ordered gain verdict passes");
+await ctrl("testRxSweep", [1]);
+const swDac = await sweepFetch();
+ok(swDac.kind === 2 && swDac.param === 1, "DAC sweep blob kind/param");
+ok(swDac.points[0].setting === -15 &&
+   swDac.points[swDac.points.length - 1].setting === 15,
+   "DAC settings sign-decoded (-15..+15)");
 ok(!A.sweepVerdict([100, 130, 90, 120, 95, 110]).pass,
    "flat sweep correctly fails (open emitter detection)");
-ok(report.selftest.some((r) => r.id === P.TEST_XTALK && r.status === P.TR_FAIL),
-   "report carries the T05 FAIL");
+/* T04/T05 informational mapping (vendor instructions: optical limits
+ * are not a gate until first articles) */
+ok(A.opticalResult({ status: P.TR_FAIL, value: 81234, threshold: 50000 }, P, 75) === "info",
+   "over-threshold optical FAIL maps to info");
+ok(A.opticalResult({ status: P.TR_FAIL, value: 12, threshold: 75 }, P, 75) === "fail",
+   "frame-count failure stays a hard fail");
+ok(A.opticalResult({ status: P.TR_FAIL, value: -1, threshold: 0 }, P, 150) === "fail",
+   "bring-up error stays a hard fail");
+ok(A.opticalResult({ status: P.TR_PASS, value: 87, threshold: 200 }, P, 150) === "pass",
+   "optical PASS stays pass");
 
-/* step 9: rate count — ack, then delayed result on the same tid */
+/* step 9: rate count — SYNCHRONOUS on real firmware: one response,
+ * payload carries the result (the app's `until` also tolerates an ack) */
 {
   const resp = await ctrl("testRateCount", [10],
     { until: (r) => r.payload.length === 8, timeoutMs: 8000 });
@@ -260,24 +289,32 @@ ok(report.selftest.some((r) => r.id === P.TEST_XTALK && r.status === P.TR_FAIL),
   eq(edges.length, 10, "10 button edges (5 presses)");
   ok(edges.every((e, i) => i === 0 || e.tUs > edges[i - 1].tUs),
      "button edge timestamps strictly increase");
+  ok(edges.every((e, i) => e.markerId === (i % 2 === 0 ? 1000 : 1001)),
+     "edge ids follow firmware convention (1000 press / 1001 release)");
 }
 
-/* step 12: charger walk — snapshots decode, transitions + STAT polarity */
+/* step 12: charger walk — firmware 0xE6 is a POLLED snapshot: response
+ * payload {u8 vusb, u8 stat_raw, u8 chg_state}. Poll like the app does. */
 {
-  const before = events.length;
-  await ctrl("testChargerLive", [1]);
-  await sleep(9500 * bt.timescale + 200);
-  await ctrl("testChargerLive", [0]);
-  const snaps = events.slice(before)
-    .filter((e) => e.type === P.OP_TEST_CHARGER_LIVE && e.len === 11)
-    .map((e) => ({ vusb: e.raw[8], stat: e.raw[9], state: e.raw[10] }));
-  ok(snaps.length >= 15, `charger snapshots streamed (${snaps.length})`);
+  const snaps = [];
+  const tEnd = Date.now() + 9500 * bt.timescale + 400;
+  while (Date.now() < tEnd) {
+    const resp = await ctrl("testChargerLive", [1]);
+    ok(resp.payload.length === 3, "charger snapshot payload is 3 bytes");
+    snaps.push({ vusb: resp.payload[0], stat: resp.payload[1],
+                 state: resp.payload[2] });
+    await sleep(500 * bt.timescale);
+  }
+  ok(snaps.length >= 15, `charger snapshots polled (${snaps.length})`);
   const seq = snaps.map((s) => s.state).filter((s, i, a) => !i || s !== a[i - 1]);
   eq(seq, [P.CHG_ON_BATTERY, P.CHG_CHARGING, P.CHG_COMPLETE, P.CHG_ON_BATTERY],
      "charger state walk");
   const chg = snaps.find((s) => s.state === P.CHG_CHARGING);
+  const done = snaps.find((s) => s.state === P.CHG_COMPLETE);
   const bat = snaps.find((s) => s.state === P.CHG_ON_BATTERY);
-  ok(chg.stat !== bat.stat, "raw STAT bit differs charging vs battery (polarity observable)");
+  ok(chg.stat === 0 && done.stat === 1,
+     "raw STAT: 0 charging / 1 complete (MCP73831-2ACI polarity)");
+  ok(bat.stat === 0, "STAT reads 0 on battery (T08: divider pulls Hi-Z low)");
   ok(chg.vusb === 1 && bat.vusb === 0, "VUSB tracks plug state");
 }
 
@@ -618,6 +655,19 @@ const { NarbisDashCore: DC } = require(join(here, "dashboard.js"));
   ok(battFirst !== null && battFirst - battLast >= 40,
      `sim soak: battery drained (${battFirst} -> ${battLast} mV)`);
   srv3.disconnect();
+}
+
+/* [5] dashboard ⓘ info dictionary lint */
+console.log("[5] info dictionary");
+{
+  const keys = Object.keys(DC.INFO);
+  ok(keys.length >= 24, `info dict has ${keys.length} entries (>= 24)`);
+  for (const [k, d] of Object.entries(DC.INFO)) {
+    ok(typeof d.sel === "string" && d.sel.length > 2, `${k}: has selector`);
+    ok(typeof d.text === "string" && d.text.length >= 60,
+       `${k}: definition is substantive`);
+  }
+  ok(new Set(keys).size === keys.length, "info keys unique");
 }
 
 console.log(`\nselfcheck: ${checks} checks, ${failures} failures`);

@@ -2,7 +2,7 @@
 
 Single static page, vanilla JS, **no build step, no external resources**.
 Walks an operator through the full V2.1 board verification (every net,
-every component) over BLE using the TEST opcode block (`0xE0–0xEA`,
+every component) over BLE using the TEST opcode block (`0xE0–0xEB`,
 firmware built with `NARBIS_TEST_MODE 1` in `firmware/main/board.h`).
 
 ## Running it
@@ -43,45 +43,63 @@ Steps 1–3 run automatically; the rest prompt the operator as needed.
 | 1 | T01 I2C bus scan | 0xE0 id 1 | firmware PASS record |
 | 2 | T02 WHO_AM_I ×2 | 0xE0 id 2 | firmware PASS record |
 | 3 | T03 AFE register R/W | 0xE0 id 3 | firmware PASS record |
-| 4 | T04 dark noise/ambient (clip closed, dark) | 0xE0 id 4 | value ≤ threshold |
-| 5 | T05 crosstalk (clip OPEN, no tissue) | 0xE0 id 5 | value ≤ threshold |
-| 6 | Red LED visual (20 mA, 3 s) | 0xE1 | operator confirms glow |
-| 7 | LED I-V sweeps, IR + red | 0xE2 ×2 → 0xEA | monotonic rise, not flat (flat = open emitter/FFC) |
-| 8 | RX sweep (TIA gain + offset DAC) | 0xE3 ×2 → 0xEA | dc rises with gain code |
-| 9 | ADC_RDY rate count, 10 s @100 sps | 0xE4 | within ±0.5 % of nominal |
+| 4 | T04 dark noise/ambient (clip closed, dark) | 0xE0 id 4 | values recorded; over-limit = ⓘ INFO (frames missing = FAIL) |
+| 5 | T05 crosstalk (clip OPEN, no tissue) | 0xE0 id 5 | values recorded; over-limit = ⓘ INFO (frames missing = FAIL) |
+| 6 | Red LED visual (dark 1 s → red 20 mA 3 s → dark) | 0xE1 ×2 | operator confirms the off/red/off pattern |
+| 7 | LED I-V sweeps, IR + red | 0xE2 → 0xEA, ×2 | monotonic rise, not flat (flat = open emitter/FFC) |
+| 8 | RX sweep (TIA gain + offset DAC) | 0xE3 → 0xEA, ×2 | dc tracks RF, **ohm-ordered** (codes are not monotonic) |
+| 9 | ADC_RDY rate count, 10 s @100 sps | 0xE4 (synchronous) | within ±0.5 % of nominal |
 | 10 | Accel orientation, 6 faces | 0xE8 + ACCEL stream | all six ±1 g faces captured, 0 FIFO overruns |
 | 11 | Button echo, 5 presses | 0xE5 + MARKER events | ≥10 edges, no <5 ms ghosts (TVS/C22) |
-| 12 | Charger walk (plug/unplug USB) | 0xE6 snapshots @2 Hz | ON_BATTERY→CHARGING→ON_BATTERY; **records raw STAT bit per state → resolves the STAT-polarity VERIFY-ON-BENCH item** |
+| 12 | Charger walk (plug/unplug USB) | 0xE6 polled @2 Hz | ON_BATTERY→CHARGING→ON_BATTERY; **records raw STAT bit per state → resolves the STAT-polarity VERIFY-ON-BENCH item** |
 | 13 | Battery raw vs bench meter | 0xE7 | Δ ≤ 50 mV |
 | 14 | Live PPG smoke, 60 s @100 sps | production stream | seq-gap counter stays 0 |
 | 15 | Sleep current + button wake | 0xE9 | ≤ 80 µA, wakes and re-advertises |
 
-The report card (footer) records per-step pass/fail/skip, measured value,
-expectation and operator note; **Download JSON** produces the
-manufacturing record, **Print** gives a paper copy (print CSS shows the
-report only).
+The sequence requires a **serial number** (field next to Start; mirrored
+into the dashboard recording box). The report card (footer) records
+per-step pass/fail/info/skip, measured value, expectation and operator
+note; **Download JSON** produces the manufacturing record — including
+the serial, a pass/fail/info/skip summary and the **full session log**
+(BLE traffic, errors, disconnects), so a failed unit is diagnosable from
+the report alone. **Print** gives a paper copy (print CSS shows the
+report only). The dashboard recording zip also packs `log.txt`.
 
-## Interface assumptions pending firmware (test-mode agent)
+## TEST-payload contract (firmware truth — `test_ops.c` is authoritative)
 
-`proto.h` pins the envelopes but not every TEST payload; the mock (and
-this app) implement the following conventions, which the firmware TEST
-handlers must match — flag any deviation back to this app:
+`proto.h` pins the envelopes; the payload conventions below are what the
+firmware actually implements. The mock and this app mirror them exactly
+(`node selfcheck.mjs` locks them). History note: an earlier revision of
+this section listed *assumptions* (JSON report blob, 0xE6 event stream,
+async 0xE4) that the firmware deliberately did **not** adopt — the app
+has been reconciled to the firmware, not the other way around.
 
 1. **0xE0 response payload** = one 10-byte self-test record
    `{u8 id, u8 status, i32 value, i32 threshold}` (`NC_ST_REC_SIZE`).
-2. **0xE4** acks immediately (`ST_OK`, empty payload), then sends a
-   *second indication with the same op and tid* carrying
-   `{u32 pulses, u32 elapsed_ms}` when the count window closes.
-3. **0xE6 snapshots** ride EVENT_STREAM as records of type `0xE6` (the
-   opcode value), payload `{u64 t_us, u8 vusb, u8 stat_raw, u8 chg_state}`
-   (len 11). Unknown-type records are skippable by contract, so
-   production clients ignore them.
+   Running any 0xE0 clears a previously published sweep blob.
+2. **0xE4 is synchronous**: sys_task blocks for the count window (bench
+   behavior by design) and the single response carries
+   `{u32 pulses, u32 elapsed_ms}`. Give it `window + ~8 s` of timeout;
+   the 1 Hz STATUS heartbeat pauses while it runs.
+3. **0xE6 is a stateless polled snapshot**: each request answers
+   `{u8 vusb, u8 stat_raw, u8 decoded_state}`; the legacy enable byte is
+   accepted and ignored. Nothing rides EVENT_STREAM. The app polls at
+   2 Hz during the charger walk.
 4. **0xEA report blob** (chunked `{u16 total, u16 off, u8 n, bytes}`) is
-   UTF-8 JSON with a `tests` object containing at least
-   `led_sweep_ir`/`led_sweep_red` (`{ma:[], dc:[]}`) and `rx_sweep_gain`
-   /`rx_sweep_dac` (`{code:[], dc:[]}`).
+   **binary, blob ver 2**: `[u8 2][u8 kind: 1 LED, 2 RX][u8 param]
+   [u8 n][n × {u8 setting, i32 ir, i32 red, i32 amb}]` little-endian,
+   and holds **only the most recent sweep** — fetch after *each*
+   0xE2/0xE3. For the offset-DAC sweep, `setting` is an int8 cast to u8.
+   With no sweep published it serves the T01..T08 selftest blob (ver 1).
 5. Responses to TEST opcodes echo the opcode **unchanged** (bit7 is
    already set); correlation is by tid alone — per the proto.h comment.
+6. **TIA RF codes are not ohm-ordered** (0..7 = 500k, 250k, 100k, 50k,
+   25k, 10k, 1M, 2M): any "gain rises" analysis must re-order by ohms
+   (`NarbisAnalysis.gainSweepVerdict`).
+7. **Optical limits are informational** at this stage (per the vendor
+   instructions): T04/T05 over-threshold results render as ⓘ INFO and do
+   not gate shipment; only mechanical failures (frames missing, AFE
+   bring-up error) hard-fail those steps.
 
 ## Self-test (CI)
 

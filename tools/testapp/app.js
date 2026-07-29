@@ -17,6 +17,41 @@
  * ================================================================== */
 
 const NarbisAnalysis = {
+  /* AFE4404 TIA RF code -> ohms (SBAS689D): NOT monotonic in code order.
+   * Any "gain rises" check must order points by ohms, not by code. */
+  RF_OHMS: [500e3, 250e3, 100e3, 50e3, 25e3, 10e3, 1e6, 2e6],
+
+  /* TEST sweep report blob, firmware layout (test_ops.c, blob ver 2):
+   * [u8 ver=2][u8 kind: 1 LED, 2 RX][u8 param][u8 n]
+   * [n x {u8 setting, i32 ir, i32 red, i32 amb}] little-endian.
+   * Holds ONLY the most recent sweep — fetch after each 0xE2/0xE3.
+   * For kind 2 param 1 (offset DAC) `setting` is an int8 cast to u8. */
+  parseSweepBlob(bytes) {
+    const b = bytes instanceof Uint8Array ? bytes : Uint8Array.from(bytes);
+    if (b.length < 4) throw new Error(`sweep blob too short: ${b.length}`);
+    const ver = b[0], kind = b[1], param = b[2], n = b[3];
+    if (ver !== 2) {
+      throw new Error(`sweep blob ver ${ver} (expected 2 — run a sweep first)`);
+    }
+    if (b.length !== 4 + n * 13) {
+      throw new Error(`sweep blob len ${b.length} != ${4 + n * 13}`);
+    }
+    const d = new DataView(b.buffer, b.byteOffset, b.byteLength);
+    const signedSetting = kind === 2 && param === 1;
+    const points = [];
+    for (let i = 0, off = 4; i < n; i++, off += 13) {
+      let s = d.getUint8(off);
+      if (signedSetting && s > 127) s -= 256;
+      points.push({
+        setting: s,
+        ir: d.getInt32(off + 1, true),
+        red: d.getInt32(off + 5, true),
+        amb: d.getInt32(off + 9, true),
+      });
+    }
+    return { ver, kind, param, points };
+  },
+
   /* Sweep sanity: a healthy LED/RX sweep rises monotonically and is not
    * flat. Flat response = open emitter / disconnected FFC / dead RX. */
   sweepVerdict(ys, opts) {
@@ -39,6 +74,31 @@ const NarbisAnalysis = {
       note: flat ? "FLAT response — open emitter / FFC / RX path"
         : (pass ? "monotonic rise" : "non-monotonic response"),
     };
+  },
+
+  /* TIA gain sweep: photocurrent must track RF ohms. Codes are swept
+   * 0..7 but the ohm ladder is non-monotonic (see RF_OHMS), so order by
+   * ohms first, then apply the monotonic-rise check. */
+  gainSweepVerdict(codes, dcs, opts) {
+    const pts = codes.map((c, i) => ({ ohms: this.RF_OHMS[c & 7], dc: dcs[i] }))
+      .sort((a, b) => a.ohms - b.ohms);
+    const v = this.sweepVerdict(pts.map((p) => p.dc), opts);
+    v.note = v.flat ? "FLAT vs RF — dead RX path / INP-INM wiring"
+      : (v.pass ? "dc tracks RF (ohm-ordered)" : "dc does not track RF");
+    return v;
+  },
+
+  /* T04/T05 result mapping per the vendor instructions: optical limits
+   * are INFORMATIONAL until first articles set binding thresholds. A
+   * FAIL record is a hard fail only when the mechanics failed — frames
+   * missing (threshold slot = the frame-count minimum) or a negative
+   * value (bring-up/attach error). A genuine over-threshold optical
+   * value records as "info", never blocks the vendor line. */
+  opticalResult(rec, P, frameThr) {
+    if (rec.status === P.TR_PASS) return "pass";
+    if (rec.status !== P.TR_FAIL) return "skip";
+    if (rec.value < 0 || rec.threshold === frameThr) return "fail";
+    return "info";
   },
 
   /* ADC_RDY rate accuracy: DoD is ±0.5 % of nominal. */
@@ -234,13 +294,10 @@ if (typeof document !== "undefined") (() => {
     return out;
   }
 
-  async function fetchReportJson() {
-    const blob = await fetchBlob("testReport");
-    const text = new TextDecoder().decode(blob);
-    try { return JSON.parse(text); }
-    catch (e) {
-      throw new Error(`TEST report blob is not the agreed JSON: ${e.message}`);
-    }
+  /* One sweep's data (0xEA serves the firmware's binary v2 blob, which
+   * holds only the MOST RECENT 0xE2/0xE3 sweep — call after each). */
+  async function fetchSweep() {
+    return NarbisAnalysis.parseSweepBlob(await fetchBlob("testReport"));
   }
 
   /* Refcounted: the dashboard tab holds long-lived subscriptions on the
@@ -326,7 +383,7 @@ if (typeof document !== "undefined") (() => {
   function otaUiSync() {
     const ready = !!(S.server && S.server.connected && S.chars.otaCtrl &&
                      $("otaFile").files.length && !S.flashing &&
-                     !S.seqRunning);
+                     !S.seqRunning && !S.currentStep);
     $("btnFlash").disabled = !ready;
   }
 
@@ -458,6 +515,8 @@ if (typeof document !== "undefined") (() => {
 
   async function connect(reuseDevice) {
     banner(null);
+    S.expectDisconnect = false;   /* stale sleep-test flag must not mask
+                                     a real mid-session drop */
     S.bt = S.bt || (MOCK ? NarbisMock.create({ timescale: TS, sim: true })
                          : navigator.bluetooth);
     if (!S.bt) {
@@ -846,7 +905,13 @@ if (typeof document !== "undefined") (() => {
 
   const A = NarbisAnalysis;
 
-  function stepSelftest(num, name, testId, prompt) {
+  /* opts.frameThr marks an INFORMATIONAL optical test (T04/T05): the
+   * value-vs-threshold verdict records as "info" per the vendor
+   * instructions ("optical steps report values — they cannot fail at
+   * this stage"); only mechanical failures (no frames / bring-up error)
+   * hard-fail. frameThr = the firmware's frame-count minimum, which
+   * identifies that failure mode in the record's threshold slot. */
+  function stepSelftest(num, name, testId, prompt, opts = {}) {
     return {
       id: `t${String(testId).padStart(2, "0")}`,
       name: `${num} ${name}`,
@@ -859,16 +924,27 @@ if (typeof document !== "undefined") (() => {
           ctx.instruct(`${name} — automatic.`);
         }
         ctx.readout("running…");
-        const resp = await ctx.race(ctrl("testSelftestOne", [testId]));
+        const resp = await ctx.race(ctrl("testSelftestOne", [testId],
+                                         { timeoutMs: 15000 }));
         const rec = NP.parseSelftestRecord(resp.payload);
-        const pass = rec.status === P.TR_PASS;
-        ctx.readout(`<span class="big ${pass ? "pass" : "fail"}">` +
-          `${pass ? "PASS" : "FAIL"}</span>  value=${rec.value}  ` +
-          `threshold=${rec.threshold}`);
+        const result = opts.frameThr !== undefined
+          ? A.opticalResult(rec, P, opts.frameThr)
+          : (rec.status === P.TR_PASS ? "pass" : "fail");
+        const big = { pass: "PASS", fail: "FAIL", info: "INFO", skip: "SKIP" };
+        ctx.readout(`<span class="big ${result}">${big[result]}</span>  ` +
+          `value=${rec.value}  threshold=${rec.threshold}` +
+          (result === "info"
+            ? "<br>over the placeholder limit — recorded as informational " +
+              "(Narbis sets binding optical limits after first articles)"
+            : ""));
         return {
-          result: pass ? "pass" : "fail",
+          result,
           value: String(rec.value),
           expected: `thr ${rec.threshold}`,
+          note: result === "info"
+            ? "over placeholder optical limit — informational, not a gate"
+            : (result === "fail" && opts.frameThr !== undefined
+               ? "hardware fault: frames missing / AFE bring-up failed" : ""),
         };
       },
     };
@@ -880,29 +956,39 @@ if (typeof document !== "undefined") (() => {
     stepSelftest("3.", "T03 AFE register R/W", P.TEST_AFE_REG_RW),
     stepSelftest("4.", "T04 Dark noise / ambient leak", P.TEST_AFE_DARK,
       "<strong>Close the clip</strong> on the opaque dark target (or cover " +
-      "both optical windows completely). Keep it away from bright light."),
+      "both optical windows completely). Keep it away from bright light.",
+      { frameThr: 150 } /* informational optical limits; 150 = frame min */),
     stepSelftest("5.", "T05 Optical crosstalk", P.TEST_XTALK,
       "<strong>Open the clip</strong> — nothing between emitter and " +
-      "photodiode, normal room light. Measures direct LED→PD leakage."),
+      "photodiode, normal room light. Measures direct LED→PD leakage.",
+      { frameThr: 75 }),
 
     {
       id: "led_visual", name: "6. Red LED visual check", mode: "manual",
       async run(ctx) {
-        ctx.instruct("Watch the emitter board. The <strong>red LED</strong> " +
-          "will light at 20 mA for 3 seconds.");
+        /* The TEST-build connect indicator already glows steady while
+         * connected, so a bare "it lights" prompt proves nothing. Drive
+         * a pattern the indicator never makes: dark 1 s -> red-only
+         * 3 s -> dark, and ask about THAT. */
+        ctx.instruct("Watch the emitter board. The LED will go " +
+          "<strong>dark for 1 s</strong>, then the <strong>red LED alone</strong> " +
+          "lights at 20 mA for 3 s, then dark again.");
         await ctx.buttons([{ label: "Fire red LED", value: "go", kind: "primary" }]);
+        await ctx.race(ctrl("testLedDrive", [1, 0, 0]));   /* LEDs dark */
+        ctx.readout('<span class="big">dark…</span>');
+        await ctx.sleep(1000 * ctx.ts);
         await ctx.race(ctrl("testLedDrive", [1, 20, 3000]));
         ctx.readout('<span class="big" style="color:#e34d6a">● RED ON</span> 20 mA, 3 s');
         await ctx.sleep(3000 * ctx.ts);
-        ctx.readout("");
+        ctx.readout("dark again — did you see the off / RED / off pattern?");
         const ans = await ctx.buttons([
-          { label: "Yes — it glowed", value: "yes", kind: "good" },
+          { label: "Yes — off, red glow, off", value: "yes", kind: "good" },
           { label: "No glow", value: "no", kind: "bad" },
         ]);
         return {
           result: ans === "yes" ? "pass" : "fail",
-          value: ans === "yes" ? "glow confirmed" : "no glow",
-          expected: "visible red glow",
+          value: ans === "yes" ? "glow pattern confirmed" : "no glow",
+          expected: "dark → red glow (3 s) → dark",
           note: ans === "yes" ? "" : "check TX2 net / FFC / emitter board",
         };
       },
@@ -912,18 +998,31 @@ if (typeof document !== "undefined") (() => {
       id: "led_sweep", name: "7. LED I-V sweeps (IR + red)", mode: "auto",
       async run(ctx) {
         ctx.instruct("Sweeping LED current 0→max in 2 mA steps, both LEDs, " +
-          "reading DC photocurrent per step. Keep the clip still.");
-        ctx.readout("sweeping IR…");
-        await ctx.race(ctrl("testLedSweep", [0, 2], { timeoutMs: 30000 * ctx.ts + 8000 }));
-        ctx.readout("sweeping RED…");
-        await ctx.race(ctrl("testLedSweep", [1, 2], { timeoutMs: 30000 * ctx.ts + 8000 }));
-        ctx.readout("fetching report…");
-        const rep = await ctx.race(fetchReportJson());
-        const ir = rep.tests.led_sweep_ir, red = rep.tests.led_sweep_red;
-        if (!ir || !red) throw new Error("report has no led_sweep results");
+          "reading DC photocurrent per step. Keep the clip still. Each " +
+          "sweep blocks the device for a few seconds — the status " +
+          "heartbeat pauses; that is normal.");
+        /* The firmware's report blob holds only the LAST sweep (test_ops.c
+         * blob ver 2) — run 0xE2, fetch 0xEA, then repeat for the other LED. */
+        const sweep1 = async (led, label) => {
+          ctx.readout(`sweeping ${label}… (device blocks ~6 s)`);
+          await ctx.race(ctrl("testLedSweep", [led, 2],
+                              { timeoutMs: 30000 * ctx.ts + 8000 }));
+          const rep = await ctx.race(fetchSweep());
+          if (rep.kind !== 1 || rep.param !== led) {
+            throw new Error(`sweep blob is kind ${rep.kind}/param ${rep.param}` +
+                            `, expected LED ${led}`);
+          }
+          return {
+            ma: rep.points.map((p) => p.setting),
+            /* the swept LED's own RX channel, ambient-subtracted */
+            dc: rep.points.map((p) => (led === 0 ? p.ir : p.red) - p.amb),
+          };
+        };
+        const ir = await sweep1(0, "IR");
+        const red = await sweep1(1, "RED");
         ctx.drawPlot([
-          { x: ir.ma, y: ir.dc, color: COLORS.ir, label: "IR dc vs mA" },
-          { x: red.ma, y: red.dc, color: COLORS.red, label: "RED dc vs mA" },
+          { x: ir.ma, y: ir.dc, color: COLORS.ir, label: "IR dc-amb vs mA" },
+          { x: red.ma, y: red.dc, color: COLORS.red, label: "RED dc-amb vs mA" },
         ], { xlabel: "LED mA", y0: true });
         const vIr = A.sweepVerdict(ir.dc), vRed = A.sweepVerdict(red.dc);
         const pass = vIr.pass && vRed.pass;
@@ -942,30 +1041,40 @@ if (typeof document !== "undefined") (() => {
     {
       id: "rx_sweep", name: "8. RX chain sweep (TIA gain + offset DAC)", mode: "auto",
       async run(ctx) {
-        ctx.instruct("Sweeping TIA gain codes 0..7 and the offset DAC, " +
-          "reading DC per setting. Verifies INP/INM wiring and DAC function.");
-        ctx.readout("sweeping TIA gain…");
+        ctx.instruct("Sweeping TIA gain codes 0..7 and the offset DAC at a " +
+          "fixed 20 mA IR drive, reading DC per setting. Verifies INP/INM " +
+          "wiring and DAC function. RF codes are not in ohm order — the " +
+          "verdict re-orders by actual RF (500k…10k, 1M, 2M).");
+        /* fetch after EACH sweep — the blob holds only the last one */
+        ctx.readout("sweeping TIA gain… (device blocks ~2 s)");
         await ctx.race(ctrl("testRxSweep", [0], { timeoutMs: 20000 * ctx.ts + 8000 }));
-        ctx.readout("sweeping offset DAC…");
+        const repGain = await ctx.race(fetchSweep());
+        if (repGain.kind !== 2 || repGain.param !== 0) {
+          throw new Error(`sweep blob kind ${repGain.kind}/param ` +
+                          `${repGain.param}, expected TIA gain`);
+        }
+        const gain = {
+          code: repGain.points.map((p) => p.setting),
+          dc: repGain.points.map((p) => p.ir - p.amb),
+        };
+        ctx.readout("sweeping offset DAC… (device blocks ~7 s)");
         await ctx.race(ctrl("testRxSweep", [1], { timeoutMs: 20000 * ctx.ts + 8000 }));
-        const rep = await ctx.race(fetchReportJson());
-        const gain = rep.tests.rx_sweep_gain;
-        if (!gain) throw new Error("report has no rx_sweep_gain results");
+        const repDac = await ctx.race(fetchSweep());
         const series = [{ x: gain.code, y: gain.dc, color: COLORS.accent,
-                          label: "dc vs TIA gain code" }];
-        if (rep.tests.rx_sweep_dac) {
-          series.push({ x: rep.tests.rx_sweep_dac.code.map((c, i) => i),
-                        y: rep.tests.rx_sweep_dac.dc, color: COLORS.ir,
-                        label: "dc vs offset-DAC step" });
+                          label: "dc-amb vs TIA gain code" }];
+        if (repDac.kind === 2 && repDac.param === 1) {
+          series.push({ x: repDac.points.map((p) => p.setting),
+                        y: repDac.points.map((p) => p.ir),
+                        color: COLORS.ir, label: "IR dc vs offset-DAC code" });
         }
         ctx.drawPlot(series, { xlabel: "code", y0: true });
-        const v = A.sweepVerdict(gain.dc, { minRisingFrac: 0.85 });
+        const v = A.gainSweepVerdict(gain.code, gain.dc, { minRisingFrac: 0.85 });
         ctx.readout(`TIA gain sweep: ${v.note} ` +
-                    `(rising ${(v.risingFrac * 100).toFixed(0)}%)`);
+                    `(rising ${(v.risingFrac * 100).toFixed(0)}% ohm-ordered)`);
         return {
           result: v.pass ? "pass" : "fail",
           value: `span ${v.span}, rising ${(v.risingFrac * 100).toFixed(0)}%`,
-          expected: "dc rises with gain code",
+          expected: "dc tracks RF (ohm-ordered)",
           note: v.pass ? "" : v.note,
         };
       },
@@ -1099,7 +1208,6 @@ if (typeof document !== "undefined") (() => {
           "<strong>unplug</strong> again. Live VUSB/STAT at 2 Hz. This " +
           "resolves the STAT-polarity VERIFY-ON-BENCH item — note the raw " +
           "STAT bit in each state.");
-        await ctx.race(ctrl("testChargerLive", [1]));
         const seen = [];            /* decoded charger state transitions */
         const statByState = {};     /* state -> raw STAT bit observed    */
         let doneRes;
@@ -1107,27 +1215,45 @@ if (typeof document !== "undefined") (() => {
         const stateName = { [P.CHG_ON_BATTERY]: "ON_BATTERY",
                             [P.CHG_CHARGING]: "CHARGING",
                             [P.CHG_COMPLETE]: "COMPLETE" };
-        ctx.setEventSink((ev) => {
-          /* TEST charger snapshot: event type == the 0xE6 opcode, payload
-           * {u64 t_us, u8 vusb, u8 stat_raw, u8 chg_state} (README note) */
-          if (ev.type !== P.OP_TEST_CHARGER_LIVE || ev.len !== 11) return;
-          const vusb = ev.raw[8], stat = ev.raw[9], st = ev.raw[10];
-          statByState[st] = stat;
-          if (!seen.length || seen[seen.length - 1] !== st) seen.push(st);
-          ctx.readout(
-            `<span class="big">STAT raw = ${stat}</span>   VUSB = ${vusb}\n` +
-            `decoded: ${stateName[st] || st}\n` +
-            `transitions: ${seen.map((s) => stateName[s] || s).join(" → ")}`);
-          const iBat = seen.indexOf(P.CHG_ON_BATTERY);
-          const iChg = seen.indexOf(P.CHG_CHARGING, iBat + 1);
-          if (iBat === 0 && iChg > 0 &&
-              seen.lastIndexOf(P.CHG_ON_BATTERY) > iChg) doneRes();
-        });
-        const finish = await ctx.race(Promise.race([
-          done.then(() => "auto"),
-          ctx.buttons([{ label: "Done (evaluate now)", value: "manual" }]),
-        ]));
-        try { await ctrl("testChargerLive", [0]); } catch (_) {}
+        /* Firmware 0xE6 is a stateless POLLED snapshot (test_ops.c): the
+         * response payload is {u8 vusb, u8 stat_raw, u8 chg_state}. Poll
+         * at 2 Hz while the operator plugs/unplugs; a serialized loop so
+         * a slow response never stacks requests. */
+        let polling = true;
+        const pollLoop = (async () => {
+          while (polling) {
+            try {
+              const resp = await ctrl("testChargerLive", [1]);
+              if (resp.payload.length >= 3) {
+                const vusb = resp.payload[0], stat = resp.payload[1],
+                      st = resp.payload[2];
+                statByState[st] = stat;
+                if (!seen.length || seen[seen.length - 1] !== st) seen.push(st);
+                ctx.readout(
+                  `<span class="big">STAT raw = ${stat}</span>   VUSB = ${vusb}\n` +
+                  `decoded: ${stateName[st] || st}\n` +
+                  `transitions: ${seen.map((s) => stateName[s] || s).join(" → ")}`);
+                const iBat = seen.indexOf(P.CHG_ON_BATTERY);
+                const iChg = seen.indexOf(P.CHG_CHARGING, iBat + 1);
+                if (iBat === 0 && iChg > 0 &&
+                    seen.lastIndexOf(P.CHG_ON_BATTERY) > iChg) doneRes();
+              }
+            } catch (e) {
+              if (polling) log(`charger poll: ${e.message}`);
+            }
+            await new Promise((r) => setTimeout(r, 500 * ctx.ts));
+          }
+        })();
+        let finish;
+        try {
+          finish = await ctx.race(Promise.race([
+            done.then(() => "auto"),
+            ctx.buttons([{ label: "Done (evaluate now)", value: "manual" }]),
+          ]));
+        } finally {
+          polling = false;
+          await pollLoop.catch(() => {});
+        }
         const sawChg = seen.includes(P.CHG_CHARGING);
         const sawBat = seen[0] === P.CHG_ON_BATTERY;
         const returned = seen.lastIndexOf(P.CHG_ON_BATTERY) >
@@ -1271,12 +1397,28 @@ if (typeof document !== "undefined") (() => {
       const st = r ? r.result : (step === S.currentStep ? "running" : "");
       li.className = step === S.currentStep ? "active" : "";
       const ico = st === "pass" ? "✓" : st === "fail" ? "✕" :
+                  st === "info" ? "ⓘ" :
                   st === "skip" ? "»" : st === "running" ? "…" : i + 1;
       li.innerHTML =
         `<span class="st-ico ${st}">${ico}</span>` +
         `<span class="st-name">${step.name}` +
         `<span class="mode">${step.mode}</span></span>` +
         `<span class="st-val ${st}">${r && r.value ? r.value : ""}</span>`;
+      /* after a run: click a completed step to re-run just that one
+       * (troubleshooting flow — a rerun replaces the step's report row) */
+      if (r && !S.seqRunning && !S.currentStep) {
+        li.classList.add("rerunnable");
+        li.title = "click to re-run this step";
+        li.onclick = () => {
+          if (S.seqRunning || S.currentStep || S.flashing) return;
+          if (!(S.server && S.server.connected)) {
+            banner("Reconnect first to re-run a step.", "error");
+            return;
+          }
+          log(`re-running step: ${step.name}`);
+          runStep(step, i);
+        };
+      }
       ol.appendChild(li);
     });
   }
@@ -1313,12 +1455,36 @@ if (typeof document !== "undefined") (() => {
     renderReport();
   }
 
+  function serialNumber() {
+    return ($("serialInput").value || "").trim();
+  }
+
   async function runSequence() {
+    if (S.seqRunning || S.currentStep) return;   /* incl. single-step rerun */
+    if (!serialNumber()) {
+      banner("Type the board's serial number first — the report and " +
+             "recording are filed per serial.", "error");
+      $("serialInput").focus();
+      return;
+    }
+    /* one serial per session: mirror into the dashboard recording box */
+    const rs = $("recSerial");
+    if (rs) rs.value = serialNumber();
     if (S.seqRunning) return;
     S.seqRunning = true;
     S.results = [];
     $("btnStart").disabled = true;
     banner(null);
+    /* Quiesce anything the dashboard tab started: the T0x selftests and
+     * the 0xE2/0xE3 sweeps refuse while acquisition runs. streamStop also
+     * latches the per-source stop bits, so lingering CCCD subscriptions
+     * cannot restart acquisition mid-sequence (fresh subscribes in the
+     * accel/PPG steps clear their own bits). */
+    try {
+      await ctrl("testLedSweepCont", [0, 0, 0]);
+      await ctrl("streamStop", [P.STREAM_MASK_PPG | P.STREAM_MASK_ACCEL |
+                                P.STREAM_MASK_IBI | P.STREAM_MASK_EVENT]);
+    } catch (e) { log(`pre-sequence quiesce: ${e.message}`); }
     for (let i = 0; i < STEPS.length; i++) {
       if (!S.server || (!S.server.connected && STEPS[i].id !== "sleep")) {
         /* connection gone mid-sequence (sleep step disconnects at the end
@@ -1336,10 +1502,12 @@ if (typeof document !== "undefined") (() => {
     $("btnStart").disabled = !(S.server && S.server.connected);
     const n = (r) => S.results.filter((x) => x && x.result === r).length;
     const summary = `Sequence complete: ${n("pass")} pass, ${n("fail")} fail, ` +
-                    `${n("skip")} skipped.`;
+                    `${n("info")} informational, ${n("skip")} skipped.`;
     banner(summary, n("fail") ? "error" : "");
     instruct(summary + " Review the report card below, then Download JSON " +
-             "or Print for the manufacturing record.");
+             "or Print for the manufacturing record." +
+             (n("info") ? " ⓘ steps recorded optical values against " +
+              "placeholder limits — informational, not a ship gate." : ""));
     renderChecklist();
     renderReport();
   }
@@ -1347,10 +1515,13 @@ if (typeof document !== "undefined") (() => {
   /* ---------------- report card ---------------- */
 
   function reportObject() {
+    const steps = S.results.filter(Boolean);
+    const n = (r) => steps.filter((x) => x.result === r).length;
     return {
       tool: "narbis-testapp",
       generated: new Date().toISOString(),
-      mock: MOCK,
+      mock: MOCK || S.demoMode,
+      serial: serialNumber() || null,
       device: {
         name: S.device ? S.device.name : null,
         id: S.device ? S.device.id : null,
@@ -1362,7 +1533,12 @@ if (typeof document !== "undefined") (() => {
           ? `${S.protoVer >> 8}.${S.protoVer & 0xFF}` : null,
         clockPair: S.clock,
       },
-      steps: S.results.filter(Boolean),
+      summary: { pass: n("pass"), fail: n("fail"),
+                 info: n("info"), skip: n("skip") },
+      steps,
+      /* full session log rides along so a failed unit is diagnosable
+       * from the report alone (BLE traffic, errors, disconnects) */
+      log: S.logLines.slice(-4000),
     };
   }
 
@@ -1395,8 +1571,9 @@ if (typeof document !== "undefined") (() => {
                           { type: "application/json" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    const dev = (S.device && S.device.name || "narbis").replace(/\W+/g, "_");
-    a.download = `pcbtest_${dev}_${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+    const ser = (serialNumber() || S.device && S.device.name || "narbis")
+      .replace(/\W+/g, "_");
+    a.download = `pcbtest_${ser}_${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
     a.click();
     URL.revokeObjectURL(a.href);
   }
@@ -1445,7 +1622,7 @@ if (typeof document !== "undefined") (() => {
     isMock: () => MOCK || S.demoMode,
     ctrl, subscribe, fetchBlob, log, banner, hexBytes,
     getLogLines: () => S.logLines,
-    onGuidedBusy: () => S.seqRunning || S.flashing,
+    onGuidedBusy: () => S.seqRunning || S.flashing || !!S.currentStep,
   };
 
   renderChecklist();

@@ -55,9 +55,12 @@ the LED runs at a 1% optical duty cycle). No blink = board fails, set aside.
 5. When the sequence ends: click **Download JSON** (the report card) and,
    from the Dashboard tab, make a ~60 second **recording** with a fingertip
    on the sensor and download the `.zip`.
-6. **Ship gate:** every step PASS (optical steps report values — they
-   cannot fail at this stage), report + recording saved per serial number.
-   Send all files to Narbis with the shipment.
+6. **Ship gate:** every step **PASS or ⓘ INFO**. Blue ⓘ INFO means an
+   optical value was recorded against a provisional limit — that is
+   expected at this stage and does **not** reject the board (Narbis sets
+   binding limits after receiving first articles). A red **FAIL** on any
+   step rejects the board. Report + recording saved per serial number;
+   send all files to Narbis with the shipment.
 
 ## 4. Optional: deep-sleep current (sample plan per Narbis PO)
 
@@ -80,6 +83,7 @@ flashed with anything else, re-run step 1.
 | No LED blink after boot | Re-flash once; still dark → **fail unit** (log it). |
 | Not in Chrome's device list | Board on? (hold 1 s, look for blink) · within 1 m? · Chrome has Bluetooth permission? |
 | Connect drops repeatedly | Move away from other 2.4 GHz gear; retry; note it in the report. |
-| A step fails | Re-run the step once (Skip → rerun). Persistent fail → record and set the unit aside. |
+| A step shows blue ⓘ INFO | Not a failure — the value is recorded for Narbis. Continue. |
+| A step fails (red FAIL) | After the sequence ends, **click that step in the checklist** to re-run just it. Persistent fail → record and set the unit aside. |
 
 Questions / results submission: dgreco@narbis.com
