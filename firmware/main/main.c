@@ -26,7 +26,9 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/task.h"
 
+#include "driver/gpio.h"
 #include "esp_app_desc.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
@@ -45,6 +47,7 @@
 #include "ota.h"
 #include "power.h"
 #include "sensor_types.h"
+#include "test_led_ind.h"
 
 #include "narbis/nc_knobs.h"
 
@@ -118,6 +121,26 @@ void app_main(void)
         break;   /* BUTTON / COLD / OTHER — full boot */
     }
 
+#if NARBIS_TEST_MODE
+    /* Vendor-bench power-on: a button wake must be a deliberate 1 s
+     * continuous hold (sampled every 10 ms on the pad power_boot_cause
+     * already configured input+pull-up); any release -> ghost, straight
+     * back to sleep with the previous OFF policy. USB-powered cold
+     * boots decode as PWR_BOOT_COLD, not BUTTON, so they never take
+     * this path — plugging a bench DUT in boots it without the hold. */
+    if (cause == PWR_BOOT_BUTTON) {
+        for (int held_ms = 0; held_ms < 1000; held_ms += 10) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            if (gpio_get_level(PIN_BUTTON) != 0) {
+                ESP_LOGW(TAG, "TEST boot: button released at %d ms — ghost",
+                         held_ms);
+                power_enter_off(power_last_off_battery_forced());
+            }
+        }
+        ESP_LOGI(TAG, "TEST boot: 1 s hold confirmed");
+    }
+#endif
+
     /* --------------------------- full boot --------------------------- */
 
     /* sys_q (and every other queue) is created inside acq_init before
@@ -155,6 +178,11 @@ void app_main(void)
     console_init();
     ota_engine_init();
     ota_boot_validate();                /* mark-valid / rollback decision */
+
+    /* TEST builds: LED connect indicator (1 Hz pulse until a central
+     * connects). Needs acq_init (AFE driver + sys_task) and BLE up;
+     * the actual LED writes run in sys_task context. No-op in prod. */
+    test_led_ind_start();
 
     const esp_app_desc_t *app = esp_app_get_description();
     ESP_LOGI(TAG,

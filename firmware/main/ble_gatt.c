@@ -66,6 +66,7 @@
 #include "ble_iface.h"
 #include "ble_ota_iface.h"
 #include "board.h"
+#include "dfu_legacy.h"
 
 #include "narbis/proto.h"
 #include "narbis/nc_knobs.h"
@@ -688,6 +689,7 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         s_conn = BLE_HS_CONN_HANDLE_NONE;
         clear_link_state();
         ble_tx_flush_all();
+        dfu_legacy_on_disconnect();   /* abort a mid-flight legacy DFU */
         post_conn_change(false);
         adv_start(true);
         return 0;
@@ -884,6 +886,13 @@ esp_err_t ble_iface_init(void)
     if (rc != 0) {
         ESP_LOGE(TAG, "gatts_add_svcs: rc=%d", rc);
         return ESP_FAIL;
+    }
+    /* Legacy DFU service 0x00FF (dfu_legacy.c owns table + callbacks;
+     * service-module registration idiom, same as ble_svc_gap_init).
+     * Hardened to encrypted-only exactly when the custom tables are. */
+    err = dfu_legacy_gatt_register(!s_sec_open);
+    if (err != ESP_OK) {
+        return err;
     }
     rc = ble_svc_gap_device_name_set(s_name);
     if (rc != 0) {

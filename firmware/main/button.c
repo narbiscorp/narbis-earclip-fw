@@ -40,7 +40,7 @@
 static const char *TAG = "button";
 
 static esp_timer_handle_t s_debounce_tmr;
-static bool s_reported_pressed;   /* last level posted to sys_task */
+static volatile bool s_reported_pressed;   /* last level posted to sys_task */
 
 static void IRAM_ATTR btn_isr(void *arg)
 {
@@ -131,4 +131,9 @@ esp_err_t button_init(void)
 
     ESP_LOGI(TAG, "GPIO%d armed (debounce %d ms)", PIN_BUTTON, BUTTON_DEBOUNCE_MS);
     return ESP_OK;
+}
+
+bool button_is_pressed(void)
+{
+    return s_reported_pressed;    /* single volatile bool — tear-free */
 }

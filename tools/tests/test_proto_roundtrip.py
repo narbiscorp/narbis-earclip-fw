@@ -476,7 +476,7 @@ def test_uuid_construction():
 
 
 def test_constants_spot_checks():
-    assert P.PROTO_VER == 0x0100
+    assert P.PROTO_VER == 0x0101
     assert P.OP_KNOB_DISCOVER == 0x14 and P.OP_TEST_REPORT == 0xEA
     assert P.FACTORY_MAGIC == 0x4E415242
     assert P.RATE_SPS[P.RATE_250] == 250 and P.rate_sps(99) == 0

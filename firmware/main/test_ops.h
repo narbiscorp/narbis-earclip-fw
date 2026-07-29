@@ -24,6 +24,7 @@
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
+#include "esp_err.h"
 #include "narbis/proto.h"
 
 /*
@@ -34,3 +35,19 @@
 nc_ctrl_status_t test_ops_dispatch(uint8_t op, const uint8_t *pl,
                                    size_t len, uint8_t *resp,
                                    size_t *resp_len);
+
+/*
+ * sys_task context, from conn_sync on the disconnect edge: stop
+ * session-scoped TEST machinery — currently the 0xEB continuous LED
+ * sweep (swept LEDs driven to 0; the connect indicator re-arms on its
+ * next tick). No-op stub in production builds.
+ */
+void test_ops_on_disconnect(void);
+
+/*
+ * sys_task context (TEST builds only — production never links a
+ * caller): bring the bench AFE up at 100 sps if the PPG pipeline does
+ * not own it, self-healing after anything powered the AFE down. Shared
+ * with test_led_ind.c so bench-state bookkeeping has one owner.
+ */
+esp_err_t test_ops_ensure_bench_afe(void);

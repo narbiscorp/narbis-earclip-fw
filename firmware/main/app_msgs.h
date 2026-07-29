@@ -26,6 +26,9 @@ typedef enum {
     SYS_POWER_OFF_REQ,   /* button/CONTROL/low-batt initiated            */
     SYS_CONN_CHANGE,     /* u.flag: BLE connect(1)/disconnect(0)         */
     SYS_ENTER_OTA,       /* OTA service asked for acquisition stop       */
+    SYS_TEST_IND,        /* TEST builds: LED connect-indicator 500 ms
+                            tick (test_led_ind.c) — LED I2C runs in sys
+                            ctx so it serializes with ops/AGC           */
 } sys_msg_type_t;
 
 typedef struct {

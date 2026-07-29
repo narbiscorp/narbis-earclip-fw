@@ -41,14 +41,7 @@ OUT_JS = REPO / "tools" / "testapp" / "proto_consts.js"
 # Known cross-mirror discrepancies we tolerate (loudly).              #
 # name -> (header_value, python_value, note)                          #
 # ------------------------------------------------------------------ #
-WAIVED_PY_MISMATCH = {
-    # proto.h: NC_KNOB_REC_FIXED = 21 (id2+type+flags+min/max/def/current16
-    # +name_len1). proto.py ships 19; the constant is unused by its codec
-    # logic (which walks _KNOB_REC_HEAD.size = 20 directly), so the wire
-    # format agrees — only the informational constant is wrong. Owner of
-    # narbis_client should fix proto.py to 21; then delete this waiver.
-    "KNOB_REC_FIXED": (21, 19, "proto.py informational constant is stale"),
-}
+WAIVED_PY_MISMATCH = set()
 
 # Constants that exist only as comments in proto.h (payload bit maps /
 # sentinels) but are part of the wire contract and present in proto.py.

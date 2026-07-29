@@ -427,6 +427,199 @@ console.log("[3] firmware update (BLE OTA)");
   dev2.gatt.disconnect();
 }
 
+/* ================================================================ */
+/* [4] dashboard: pure helpers (rings/zoom/zip/csv), proto 1.1 bits,  */
+/*     and a short simulate-mode soak                                 */
+console.log("[4] dashboard (rings, zoom, zip, csv, 0xEB, sim soak)");
+const { NarbisDashCore: DC } = require(join(here, "dashboard.js"));
+{
+  /* rolling ring: 30 s window + hard cap FIFO */
+  const r = DC.makeRing(30);
+  for (let i = 0; i <= 100; i++) r.push(i, i * 2);
+  /* trim is amortized: at most 64 aged-out points linger (draw clips) */
+  ok(r.t[0] >= 100 - 30 - 64 && r.t.length <= 30 + 65 && r.lastT() === 100,
+     `ring trims to window (kept ${r.t.length})`);
+  ok(r.last() === 200, "ring last()");
+  const mm = DC.ringMinMax(r, 90, 100);
+  ok(mm.lo === 180 && mm.hi === 200, "ringMinMax over visible span");
+  const r2 = DC.makeRing(Infinity, 100);
+  for (let i = 0; i < 250; i++) r2.push(i, i);
+  ok(r2.t.length === 100 && r2.t[0] === 150, "session ring hard-cap FIFO");
+
+  /* autoscale + zoom-around-center math */
+  const ar = DC.autoRange(0, 100);
+  ok(Math.abs(ar.center - 50) < 1e-9 && Math.abs(ar.span - 112) < 1e-9,
+     "autoRange pads the data span");
+  let z = DC.zoomStep(null, 0, 100, 1);
+  ok(Math.abs(z.span - 112 / 1.6) < 1e-6 && z.center === 50,
+     "zoom-in shrinks span around center");
+  z = DC.zoomStep(z, 0, 100, -1);
+  ok(Math.abs(z.span - 112) < 1e-6, "zoom-out restores span");
+  const auto = DC.applyZoom(0, 100, null);
+  ok(auto[0] < 0 && auto[1] > 100, "applyZoom auto covers data");
+  eq(DC.applyZoom(0, 100, { center: 10, span: 4 }), [8, 12],
+     "applyZoom manual override");
+
+  /* seq-gap counter: counts skips, tolerates event-batch repeats */
+  const gc = DC.gapCounter();
+  for (const s of [0, 1, 2, 4, 4, 5, 9]) gc.feed(s);
+  eq(gc.gaps, 2, "gap counter (skip at 4 and 9, repeat tolerated)");
+
+  /* csv escaping */
+  eq(DC.csv(["a", "b"], [[1, "x"], [2, 'he,"llo']]),
+     'a,b\n1,x\n2,"he,""llo"\n', "csv quoting/escaping");
+
+  /* event formatter (ticker strings) */
+  ok(DC.fmtEvent({ type: P.EV_MARKER, known: true, tUs: 2e6,
+                   source: P.MARKER_SRC_BUTTON, markerId: 1000 }, P)
+       .includes("button PRESS"), "fmtEvent button press (id 1000)");
+  ok(DC.fmtEvent({ type: P.EV_WEAR, known: true, tUs: 1e6, worn: 0 }, P)
+       .includes("wear OFF"), "fmtEvent wear");
+
+  /* STORE zip: verify signatures, offsets and CRCs on our own output */
+  const files = [
+    { name: "ppg.csv", data: "t,ir\n1,2\n" },
+    { name: "log.txt", data: new TextEncoder().encode("hello narbis\n") },
+  ];
+  const zip = DC.zipStore(files, NP.ota.crc32);
+  const zd = new DataView(zip.buffer, zip.byteOffset, zip.byteLength);
+  const eo = zip.length - 22;
+  ok(zd.getUint32(eo, true) === 0x06054B50, "zip EOCD signature");
+  eq(zd.getUint16(eo + 10, true), 2, "zip EOCD entry count");
+  const cdLen = zd.getUint32(eo + 12, true);
+  const cdOff = zd.getUint32(eo + 16, true);
+  ok(cdOff + cdLen + 22 === zip.length, "zip central dir spans to EOCD");
+  let p = cdOff;
+  files.forEach((f, i) => {
+    ok(zd.getUint32(p, true) === 0x02014B50, `zip central hdr ${i} sig`);
+    const crc = zd.getUint32(p + 16, true);
+    const csize = zd.getUint32(p + 20, true);
+    const nlen = zd.getUint16(p + 28, true);
+    const lof = zd.getUint32(p + 42, true);
+    ok(zd.getUint32(lof, true) === 0x04034B50, `zip local hdr ${i} at offset`);
+    eq(zd.getUint16(lof + 8, true), 0, `zip entry ${i} method STORE`);
+    const lnlen = zd.getUint16(lof + 26, true);
+    eq(lnlen, nlen, `zip entry ${i} name length agreement`);
+    const data = zip.subarray(lof + 30 + lnlen, lof + 30 + lnlen + csize);
+    ok(NP.ota.crc32(0, data) === crc, `zip entry ${i} CRC over stored bytes`);
+    eq(new TextDecoder().decode(zip.subarray(p + 46, p + 46 + nlen)),
+       f.name, `zip entry ${i} name`);
+    p += 46 + nlen;
+  });
+
+  /* proto 1.1: STATUS btnPressed (byte 27) + 0xEB builder */
+  const stB = Buffer.alloc(P.STATUS_SIZE);
+  stB[27] = 1;
+  ok(NP.parseStatus(stB).btnPressed === 1, "parseStatus btnPressed byte 27");
+  ok(NP.parseStatus(Buffer.alloc(P.STATUS_SIZE)).btnPressed === 0,
+     "legacy frame (reserved byte 0) reads btnPressed 0");
+  eq([...NP.build.testLedSweepCont(9, 3, 1, 7)], [0xEB, 9, 3, 1, 7],
+     "testLedSweepCont wire bytes");
+}
+
+/* ---- simulate-mode soak: 2 s wall, timescale 0.02 (~100 s device) ---- */
+{
+  const bt3 = NarbisMock.create({ timescale: 0.02, seed: 7, sim: true });
+  const dev3 = await bt3.requestDevice({ filters: [] });
+  const srv3 = await dev3.gatt.connect();
+  const svc3 = await srv3.getPrimaryService(P.UUID.SENSOR_SVC);
+  const ch = {};
+  for (const [k, u] of [["control", P.UUID.CONTROL], ["status", P.UUID.STATUS],
+                        ["event", P.UUID.EVENT], ["ppg", P.UUID.PPG],
+                        ["accel", P.UUID.ACCEL], ["ibi", P.UUID.IBI]]) {
+    ch[k] = await svc3.getCharacteristic(u);
+  }
+  const pend3 = new Map();
+  let tid3 = 1;
+  ch.control.addEventListener("characteristicvaluechanged", (ev) => {
+    const resp = NP.parseControlResponse(ev.target.value);
+    const f = pend3.get(resp.tid);
+    if (f) { pend3.delete(resp.tid); f(resp); }
+  });
+  const c3 = (name, args = []) => new Promise((resolve, reject) => {
+    const tid = tid3; tid3 = (tid3 & 0xFF) + 1;
+    pend3.set(tid, resolve);
+    setTimeout(() => {
+      if (pend3.delete(tid)) reject(new Error(`${name}: timeout`));
+    }, 4000);
+    ch.control.writeValue(NP.build[name](tid, ...args)).catch(reject);
+  });
+
+  let nPpg = 0, nAcc = 0, nIbi = 0, nSt = 0, ambSeen = false;
+  const evTypes = new Set(), maSeen = new Set(), btnVals = new Set();
+  const ibiMsSeen = [];
+  let battFirst = null, battLast = null;
+  ch.ppg.addEventListener("characteristicvaluechanged", (ev) => {
+    const b = NP.parsePpg(ev.target.value);
+    nPpg += b.ir.length;
+    if (b.amb) ambSeen = true;
+  });
+  ch.accel.addEventListener("characteristicvaluechanged", (ev) => {
+    nAcc += NP.parseAccel(ev.target.value).samples.length;
+  });
+  ch.ibi.addEventListener("characteristicvaluechanged", (ev) => {
+    for (const rec of NP.parseIbi(ev.target.value).records) {
+      nIbi++; ibiMsSeen.push(rec.ibiMs);
+    }
+  });
+  ch.status.addEventListener("characteristicvaluechanged", (ev) => {
+    const st = NP.parseStatus(ev.target.value);
+    nSt++;
+    maSeen.add(st.ledIrMa);
+    if (battFirst === null) battFirst = st.battMv;
+    battLast = st.battMv;
+  });
+  ch.event.addEventListener("characteristicvaluechanged", (ev) => {
+    for (const rec of NP.parseEventBatch(ev.target.value).events) {
+      evTypes.add(rec.type);
+    }
+  });
+  for (const k of ["control", "status", "event", "ppg", "accel", "ibi"]) {
+    await ch[k].startNotifications();
+  }
+  /* tight STATUS readValue poll so the ~0.6 s (device) button hold is
+   * caught regardless of the 1 Hz notify phase */
+  const btnPoll = setInterval(async () => {
+    try {
+      btnVals.add(NP.parseStatus(await ch.status.readValue()).btnPressed);
+    } catch (_) { /* disconnecting */ }
+  }, 3);
+
+  ok((await c3("streamStart",
+      [P.STREAM_MASK_PPG | P.STREAM_MASK_ACCEL |
+       P.STREAM_MASK_IBI | P.STREAM_MASK_EVENT])).status === P.ST_OK,
+     "sim: stream start (all masks)");
+  ok((await c3("testLedSweepCont", [1, 1, 1])).status === P.ST_OK,
+     "sim: 0xEB sweep start (IR, 1 s phase)");
+  await sleep(1400);
+  ok((await c3("testLedSweepCont", [0, 0, 0])).status === P.ST_OK,
+     "sim: 0xEB sweep stop");
+  /* unfreeze so the sim AGC walks the IR current again */
+  ok((await c3("agcFreeze", [0])).status === P.ST_OK, "sim: AGC unfreeze");
+  await sleep(600);
+  clearInterval(btnPoll);
+
+  ok(nPpg > 2000, `sim soak: PPG samples flowed (${nPpg})`);
+  ok(ambSeen, "sim soak: ambient present in PPG batches");
+  ok(nAcc > 500, `sim soak: accel samples flowed (${nAcc})`);
+  ok(nIbi > 30, `sim soak: IBI records flowed (${nIbi})`);
+  ok(ibiMsSeen.every((v) => v > 500 && v < 1400),
+     "sim soak: IBIs plausible for 60-75 bpm");
+  ok(nSt > 40, `sim soak: STATUS at 1 Hz device time (${nSt})`);
+  const maArr = [...maSeen];
+  ok(maArr.length >= 4 && Math.max(...maArr) >= 45 && Math.min(...maArr) <= 5,
+     `sim soak: sweep swept reported IR mA (${maArr.length} values, ` +
+     `${Math.min(...maArr)}..${Math.max(...maArr)})`);
+  ok(evTypes.has(P.EV_GATE), "sim soak: gate events during motion bursts");
+  ok(evTypes.has(P.EV_MARKER), "sim soak: button press markers emitted");
+  ok(evTypes.has(P.EV_AGC_STEP), "sim soak: AGC stepped after unfreeze");
+  ok(btnVals.has(0) && btnVals.has(1),
+     "sim soak: STATUS btnPressed toggled during auto-press");
+  ok(battFirst !== null && battFirst - battLast >= 40,
+     `sim soak: battery drained (${battFirst} -> ${battLast} mV)`);
+  srv3.disconnect();
+}
+
 console.log(`\nselfcheck: ${checks} checks, ${failures} failures`);
 if (failures) process.exit(1);
 console.log("OK");

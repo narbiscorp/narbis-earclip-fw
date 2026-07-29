@@ -132,6 +132,11 @@ const NarbisProto = (() => {
     testLedSweep: (tid, led, maStep) =>
       buildControlRequest(P.OP_TEST_LED_SWEEP, tid,
         pack([["u8", led], ["u8", maStep]])),
+    /* 0xEB continuous LED triangle sweep (proto 1.1): mask b0 IR b1 RED,
+     * enable, phase_s (0 -> firmware default 5). */
+    testLedSweepCont: (tid, mask, enable, phaseS) =>
+      buildControlRequest(P.OP_TEST_LED_SWEEP_CONT, tid,
+        pack([["u8", mask], ["u8", enable ? 1 : 0], ["u8", phaseS || 0]])),
     testRxSweep: (tid, what) =>
       buildControlRequest(P.OP_TEST_RX_SWEEP, tid, pack([["u8", what]])),
     testRateCount: (tid, seconds) =>
@@ -226,6 +231,10 @@ const NarbisProto = (() => {
       uptimeS: d.getUint32(20, true),
       ibiLastMs: d.getUint16(24, true),
       hrBpm: d.getUint8(26),
+      /* proto 1.1: byte 27 = live button level (1 = held). Older firmware
+       * ships 32-byte frames with this byte in reserved[] = 0, so reading
+       * it unconditionally is safe for every frame >= STATUS_SIZE. */
+      btnPressed: d.byteLength > 27 ? d.getUint8(27) : 0,
       extra: bytesOf(buf).slice(P.STATUS_SIZE),
     };
   }

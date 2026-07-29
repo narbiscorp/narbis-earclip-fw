@@ -32,6 +32,10 @@ nc_ctrl_status_t test_ops_dispatch(uint8_t op, const uint8_t *pl,
     return NC_ST_UNAUTHORIZED;
 }
 
+void test_ops_on_disconnect(void)
+{
+}
+
 #else /* NARBIS_TEST_MODE */
 
 #include <string.h>
@@ -59,8 +63,14 @@ nc_ctrl_status_t test_ops_dispatch(uint8_t op, const uint8_t *pl,
 #include "diag.h"
 #include "selftest.h"
 #include "sensor_types.h"
+#include "test_led_ind.h"
 
 static const char *TAG = "test_ops";
+
+/* sys_task.c (we run inline in sys context): freeze AGC exactly like
+ * NC_OP_AGC_FREEZE so STATUS + conn-teardown semantics stay coherent
+ * (link-time contract, same idiom as ble_request_conn_speed). */
+extern void sys_agc_freeze_set(bool freeze);
 
 /* ------------------------------------------------------------------ */
 /* Sweep report blob (layout documented in test_ops.h). Served through */
@@ -101,6 +111,17 @@ static esp_err_t ensure_bench_afe(nc_rate_t rate)
         s_bench_rate = rate;
     }
     return ESP_OK;
+}
+
+/* Exported flavor for test_led_ind.c (sys ctx): the indicator runs at
+ * the same 100 sps the bench ops default to, and must not re-init an
+ * AFE the PPG pipeline owns. */
+esp_err_t test_ops_ensure_bench_afe(void)
+{
+    if (acq_ppg_running()) {
+        return ESP_OK;             /* pipeline owns a live AFE */
+    }
+    return ensure_bench_afe(NC_RATE_100);
 }
 
 /* ------------------------------------------------------------------ */
@@ -151,6 +172,72 @@ static void sleep_now_cb(void *arg)
     (void)arg;
     sys_msg_t m = { .type = SYS_POWER_OFF_REQ };
     sys_post(&m);
+}
+
+/* ------------------------------------------------------------------ */
+/* 0xEB — continuous LED triangle sweep engine                         */
+/* ------------------------------------------------------------------ */
+/* 100 ms esp_timer steps compute the drive from elapsed phase time:
+ * ramp 0->max over phase_s, hold max phase_s, ramp ->0 phase_s, hold 0
+ * phase_s, repeat. Direct afe4404_set_led_ma from the esp_timer task is
+ * deliberate and safe: the driver mutex serializes the ~10 Hz register
+ * writes against sys-context config I2C (spec'd in proto.h 0xEB). */
+static esp_timer_handle_t s_sweep_tmr;
+static volatile bool      s_sweep_on;
+static uint8_t            s_sweep_mask;      /* b0 IR, b1 RED */
+static uint32_t           s_sweep_phase_us;
+static int64_t            s_sweep_t0;
+
+static uint8_t tri_ma(int64_t t_us, uint32_t phase_us, uint8_t max)
+{
+    const uint64_t cyc = (uint64_t)phase_us * 4u;
+    const uint64_t t = (uint64_t)t_us % cyc;
+    const uint32_t seg = (uint32_t)(t / phase_us);
+    const uint32_t frac = (uint32_t)(t % phase_us);
+    switch (seg) {
+    case 0:  return (uint8_t)(((uint64_t)max * frac) / phase_us);
+    case 1:  return max;
+    case 2:  return (uint8_t)(((uint64_t)max * (phase_us - frac)) / phase_us);
+    default: return 0;
+    }
+}
+
+static void sweep_tick_cb(void *arg)
+{
+    (void)arg;
+    if (!s_sweep_on) {
+        return;                   /* stop raced an in-flight dispatch */
+    }
+    const int64_t t = esp_timer_get_time() - s_sweep_t0;
+    /* Non-swept LED keeps its current (driver-cached) value. */
+    const uint8_t ir = (s_sweep_mask & 0x01)
+                           ? tri_ma(t, s_sweep_phase_us, LED_IR_MAX_MA)
+                           : afe4404_cur_ir_ma();
+    const uint8_t red = (s_sweep_mask & 0x02)
+                            ? tri_ma(t, s_sweep_phase_us, LED_RED_MAX_MA)
+                            : afe4404_cur_red_ma();
+    (void)afe4404_set_led_ma(ir, red);
+}
+
+/* sys ctx. Swept LEDs end at 0; the connect indicator re-arms (and
+ * repaints) only once the device is also disconnected. */
+static void sweep_stop(void)
+{
+    if (!s_sweep_on) {
+        return;
+    }
+    s_sweep_on = false;
+    esp_timer_stop(s_sweep_tmr);
+    /* An already-dispatched callback may still be running past its
+     * s_sweep_on check; give the (high-priority) esp_timer task a beat
+     * so our final write below lands last. */
+    vTaskDelay(pdMS_TO_TICKS(20));
+    if (afe4404_is_up()) {
+        const uint8_t ir = (s_sweep_mask & 0x01) ? 0 : afe4404_cur_ir_ma();
+        const uint8_t red = (s_sweep_mask & 0x02) ? 0 : afe4404_cur_red_ma();
+        (void)afe4404_set_led_ma(ir, red);
+    }
+    ESP_LOGI(TAG, "continuous sweep stopped");
 }
 
 static esp_err_t tmr_lazy(esp_timer_handle_t *h, esp_timer_cb_t cb,
@@ -244,6 +331,7 @@ static nc_ctrl_status_t op_led_drive(const uint8_t *pl, size_t len,
     if (led > 1) {
         return NC_ST_BAD_PARAM;
     }
+    test_led_ind_release();        /* LED-affecting op: indicator off */
     if (!acq_ppg_running() && ensure_bench_afe(NC_RATE_100) != ESP_OK) {
         return NC_ST_WRONG_STATE;
     }
@@ -288,6 +376,7 @@ static nc_ctrl_status_t op_led_sweep(const uint8_t *pl, size_t len,
     if (acq_ppg_running()) {
         return NC_ST_WRONG_STATE;     /* needs the capture ISR */
     }
+    test_led_ind_release();           /* LED-affecting op: indicator off */
     if (ensure_bench_afe(NC_RATE_100) != ESP_OK) {
         return NC_ST_WRONG_STATE;
     }
@@ -329,6 +418,7 @@ static nc_ctrl_status_t op_rx_sweep(const uint8_t *pl, size_t len,
     if (acq_ppg_running()) {
         return NC_ST_WRONG_STATE;
     }
+    test_led_ind_release();           /* LED-affecting op: indicator off */
     if (ensure_bench_afe(NC_RATE_100) != ESP_OK ||
         afe4404_set_led_ma(20, 0) != ESP_OK) {
         return NC_ST_WRONG_STATE;
@@ -535,6 +625,62 @@ static nc_ctrl_status_t op_report(const uint8_t *pl, size_t len,
     return NC_ST_OK;
 }
 
+/* 0xEB — continuous triangle sweep {u8 mask b0 IR b1 RED, u8 enable,
+ * u8 phase_s (0 -> 5)}. Runs on the bench AFE or over a live stream
+ * (the point: watch photocurrent tracking); AGC is frozen on start via
+ * the sys-owned path so STATUS shows it and conn teardown unfreezes.
+ * enable=0 leaves the freeze latched — the operator (or disconnect)
+ * clears it, mirroring NC_OP_AGC_FREEZE semantics. */
+static nc_ctrl_status_t op_led_sweep_cont(const uint8_t *pl, size_t len)
+{
+    if (len != 3) {
+        return NC_ST_BAD_LEN;
+    }
+    const uint8_t mask = pl[0], enable = pl[1];
+    uint8_t phase_s = pl[2];
+
+    if (!enable) {
+        sweep_stop();              /* idempotent when idle */
+        return NC_ST_OK;
+    }
+
+    if (mask == 0 || (mask & (uint8_t)~0x03u)) {
+        return NC_ST_BAD_PARAM;
+    }
+    if (phase_s == 0) {
+        phase_s = 5;               /* proto.h: 0 -> 5 s default */
+    }
+    if (tmr_lazy(&s_sweep_tmr, sweep_tick_cb, "to_sweepc") != ESP_OK) {
+        return NC_ST_BUSY;
+    }
+    test_led_ind_release();        /* LED-affecting op: indicator off */
+    if (!acq_ppg_running() && ensure_bench_afe(NC_RATE_100) != ESP_OK) {
+        return NC_ST_WRONG_STATE;
+    }
+    sys_agc_freeze_set(true);      /* AGC must not fight the ramp */
+
+    /* (Re)start: a second enable=1 retunes mask/phase in place. */
+    s_sweep_on = false;
+    esp_timer_stop(s_sweep_tmr);   /* INVALID_STATE when idle — ignored */
+    s_sweep_mask = mask;
+    s_sweep_phase_us = (uint32_t)phase_s * 1000000u;
+    s_sweep_t0 = esp_timer_get_time();
+    s_sweep_on = true;
+    esp_timer_start_periodic(s_sweep_tmr, 100 * 1000);
+    ESP_LOGI(TAG, "continuous sweep: mask=0x%02x phase=%us", mask, phase_s);
+    return NC_ST_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* sys ctx (conn_sync, disconnect edge): session-scoped TEST machinery */
+/* dies with the link. Button echo and the 0xE1 auto-off timer stay    */
+/* armed — they are harmless disconnected and their events just drop.  */
+/* ------------------------------------------------------------------ */
+void test_ops_on_disconnect(void)
+{
+    sweep_stop();
+}
+
 /* ------------------------------------------------------------------ */
 nc_ctrl_status_t test_ops_dispatch(uint8_t op, const uint8_t *pl,
                                    size_t len, uint8_t *resp,
@@ -552,6 +698,7 @@ nc_ctrl_status_t test_ops_dispatch(uint8_t op, const uint8_t *pl,
     case NC_OP_TEST_ACCEL_LIVE:   return op_accel_live(pl, len, resp, resp_len);
     case NC_OP_TEST_SLEEP_NOW:    return op_sleep_now(len);
     case NC_OP_TEST_REPORT:       return op_report(pl, len, resp, resp_len);
+    case NC_OP_TEST_LED_SWEEP_CONT: return op_led_sweep_cont(pl, len);
     default:                      return NC_ST_UNKNOWN_OP;
     }
 }

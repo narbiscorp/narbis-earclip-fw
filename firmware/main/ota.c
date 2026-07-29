@@ -52,6 +52,7 @@
 #include "ble_ota_iface.h"
 #include "acq.h"
 #include "afe4404.h"
+#include "dfu_legacy.h"
 #include "lis2dh12.h"
 
 static const char *TAG = "ota";
@@ -143,6 +144,13 @@ static void op_begin(uint8_t tid, const uint8_t *p, size_t n)
     }
     char ver[33] = { 0 };
     memcpy(ver, p + 9, vlen < 32 ? vlen : 32);
+
+    /* Mutual exclusion with the legacy DFU engine (dfu_legacy.c): both
+     * run on this same NimBLE host task, so this check cannot race. */
+    if (dfu_legacy_active()) {
+        ota_respond(NC_OTA_BEGIN, tid, NC_ST_BUSY, NULL, 0);
+        return;
+    }
 
     uint8_t st = NC_ST_OK;
     uint8_t pl[4];
@@ -275,6 +283,20 @@ static void op_finish(uint8_t tid)
             crc = nc_crc32(crc, buf, chunk);
         }
     }
+
+    /* 2b. Model lock (legacy DFU doc §7, shared dfu_image_hdr_ok):
+     * re-read the WRITTEN first 512 B and require magic 0xE9, chip_id
+     * 0x000D and project_name "narbis_earclip". A CRC-correct transfer
+     * of the wrong build (e.g. an Edge-glasses image) fails here before
+     * the boot partition ever switches. */
+    bool id_ok = false;
+    if (err == ESP_OK) {
+        uint32_t hlen = (s_img_size < 512) ? s_img_size : 512;
+        err = esp_partition_read(s_part, 0, buf, hlen);
+        if (err == ESP_OK) {
+            id_ok = dfu_image_hdr_ok(buf, hlen);
+        }
+    }
     free(buf);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "partition read: %s", esp_err_to_name(err));
@@ -289,6 +311,13 @@ static void op_finish(uint8_t tid)
         s_last_err = NC_OTAERR_CRC;
         s_state = NC_OTA_FAILED;
         st = NC_ST_CRC_ERR;
+        goto out;
+    }
+    if (!id_ok) {
+        ESP_LOGE(TAG, "image identity: not a narbis_earclip ESP32-C6 build");
+        s_last_err = NC_OTAERR_IMAGE;
+        s_state = NC_OTA_FAILED;
+        st = NC_ST_BAD_PARAM;
         goto out;
     }
 

@@ -21,7 +21,7 @@
 #include "narbis/nc_types.h"
 
 #define NC_PROTO_VER_MAJOR  1
-#define NC_PROTO_VER_MINOR  0
+#define NC_PROTO_VER_MINOR  1   /* 1.1: +TEST_LED_SWEEP_CONT (additive) */
 #define NC_PROTO_VER        ((NC_PROTO_VER_MAJOR << 8) | NC_PROTO_VER_MINOR)
 
 /* ------------------------------------------------------------------ */
@@ -158,7 +158,8 @@ typedef struct NC_PACKED {
     uint32_t uptime_s;
     uint16_t ibi_last_ms;
     uint8_t  hr_bpm;               /* smoothed; 0 = none */
-    uint8_t  reserved[5];
+    uint8_t  btn_pressed;          /* live GPIO2 level (1 = held), proto 1.1 */
+    uint8_t  reserved[4];
 } nc_status_t;
 
 #define NC_STF_CHARGING       (1u << 0)
@@ -208,7 +209,14 @@ typedef enum {
     NC_OP_TEST_BATT_RAW     = 0xE7, /* -> {u16 mv_cal, u16 adc_raw_avg} */
     NC_OP_TEST_ACCEL_LIVE   = 0xE8, /* u8 enable max-ODR live + overrun counter */
     NC_OP_TEST_SLEEP_NOW    = 0xE9, /* enter OFF in 10 s (current measurement) */
-    NC_OP_TEST_REPORT       = 0xEA  /* u16 offset -> consolidated report blob chunk */
+    NC_OP_TEST_REPORT       = 0xEA, /* u16 offset -> consolidated report blob chunk */
+    NC_OP_TEST_LED_SWEEP_CONT = 0xEB /* {u8 mask: b0 IR, b1 RED; u8 enable;
+                                        u8 phase_s (0 -> 5)} — continuous
+                                        0->max->0 triangle with holds:
+                                        ramp up phase_s, hold max phase_s,
+                                        ramp down phase_s, hold 0 phase_s,
+                                        repeat until enable=0/disconnect.
+                                        Freezes AGC on start. */
 } nc_opcode_t;
 
 /* Responses set bit7 (op | NC_OP_RESP_FLAG). TEST-block opcodes (0xE0+)

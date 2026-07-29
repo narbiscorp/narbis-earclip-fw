@@ -21,11 +21,17 @@
   <div id="devInfo" class="devinfo">not connected</div>
   <div class="hdr-actions">
     <button id="btnConnect" class="primary">Connect</button>
+    <button id="btnDemo">Demo (no hardware)</button>
     <button id="btnDisconnect" class="hidden">Disconnect</button>
   </div>
 </header>
 
 <div id="banner" class="banner hidden"></div>
+
+<nav id="tabbar">
+  <button id="tabGuided" class="tab active">Guided sequence</button>
+  <button id="tabDash" class="tab">Dashboard</button>
+</nav>
 
 <main>
   <section id="checklistPane">
@@ -91,9 +97,152 @@
   </table>
 </footer>
 
+<!-- ================= Dashboard tab (bench/vendor functional test) ==== -->
+<div id="dashPane" class="hidden">
+  <div class="dash-grid">
+    <div id="dashGraphs">
+      <div class="graph-card" data-graph="ppg">
+        <div class="graph-head">
+          <span class="graph-title">PPG
+            <span class="lg lg-ir">IR</span><span class="lg lg-red">RED</span>
+            <span class="lg lg-amb">AMB</span></span>
+          <span class="graph-btns">
+            <button data-act="pause" title="pause/resume">⏸</button>
+            <button data-act="zin" title="zoom Y in">+</button>
+            <button data-act="zout" title="zoom Y out">−</button>
+            <button data-act="auto" title="autoscale Y">auto</button>
+          </span>
+        </div>
+        <canvas id="dgPpg" width="640" height="190"></canvas>
+      </div>
+      <div class="graph-card" data-graph="acc">
+        <div class="graph-head">
+          <span class="graph-title">Accelerometer
+            <span class="lg lg-x">X</span><span class="lg lg-y">Y</span>
+            <span class="lg lg-z">Z</span><span class="lg lg-m">|a|</span></span>
+          <span class="graph-btns">
+            <button data-act="pause">⏸</button><button data-act="zin">+</button>
+            <button data-act="zout">−</button><button data-act="auto">auto</button>
+          </span>
+        </div>
+        <canvas id="dgAcc" width="640" height="170"></canvas>
+      </div>
+      <div class="graph-card" data-graph="beat">
+        <div class="graph-head">
+          <span class="graph-title">Beats
+            <span class="lg lg-hr">HR</span><span class="lg lg-ibi">IBI dots</span>
+            <span id="dashBeatNum" class="beat-num">HR — bpm · IBI — ms</span></span>
+          <span class="graph-btns">
+            <button data-act="pause">⏸</button><button data-act="zin">+</button>
+            <button data-act="zout">−</button><button data-act="auto">auto</button>
+          </span>
+        </div>
+        <canvas id="dgBeat" width="640" height="170"></canvas>
+      </div>
+      <div class="graph-card" data-graph="batt">
+        <div class="graph-head">
+          <span class="graph-title">Battery <span class="muted">(full session)</span></span>
+          <span class="graph-btns">
+            <button data-act="pause">⏸</button><button data-act="zin">+</button>
+            <button data-act="zout">−</button><button data-act="auto">auto</button>
+          </span>
+        </div>
+        <canvas id="dgBatt" width="640" height="130"></canvas>
+      </div>
+      <div class="dash-card">
+        <div class="pane-head"><h2>Session log</h2>
+          <button id="dashLogDl">Download .txt</button></div>
+        <div id="dashLog" class="log dash-log"></div>
+      </div>
+    </div>
+
+    <div id="dashSide">
+      <div class="dash-card">
+        <h2>Readouts</h2>
+        <div class="ro-grid">
+          <span class="ro-lbl">Battery</span>
+          <span><span id="roBattV" class="ro-big">—</span>
+            <span id="roBattPct" class="muted">—%</span>
+            <span id="roChg" class="lamp">—</span></span>
+          <span class="ro-lbl">Button</span>
+          <span id="roBtn" class="lamp off">released</span>
+          <span class="ro-lbl">Gate / Wear</span>
+          <span><span id="roGate" class="lamp off">gate</span>
+            <span id="roWear" class="lamp off">wear</span></span>
+          <span class="ro-lbl">Versions</span>
+          <span id="roVer" class="mono small">—</span>
+          <span class="ro-lbl">Link</span>
+          <span id="roLink" class="mono small">—</span>
+        </div>
+        <div class="ro-lbl" style="margin-top:6px">Events</div>
+        <div id="dashTicker" class="ticker"></div>
+      </div>
+
+      <div class="dash-card">
+        <h2>Controls</h2>
+        <div class="ctl-row">
+          <label>IR <span id="ledIrVal" class="mono">12 mA</span>
+            <span id="ledIrAct" class="muted small">act —</span></label>
+          <input type="range" id="ledIr" min="0" max="50" value="12">
+        </div>
+        <div class="ctl-row">
+          <label>Red <span id="ledRedVal" class="mono">8 mA</span>
+            <span id="ledRedAct" class="muted small">act —</span></label>
+          <input type="range" id="ledRed" min="0" max="40" value="8">
+        </div>
+        <div class="ctl-row2">
+          <label>TIA <select id="selTia"></select></label>
+          <label>PPG <select id="selRate"></select></label>
+        </div>
+        <div class="ctl-row2">
+          <label>ODR <select id="selOdr"></select></label>
+          <label>Range <select id="selFs"></select></label>
+        </div>
+        <fieldset class="sweep-box">
+          <legend>LED sweep (0xEB)</legend>
+          <label><input type="checkbox" id="swIr" checked> IR</label>
+          <label><input type="checkbox" id="swRed"> Red</label>
+          <label>phase <input type="number" id="swPhase" value="5" min="1"
+            max="60" style="width:52px"> s</label>
+          <button id="btnSweep" class="primary">Start</button>
+        </fieldset>
+        <div class="ctl-btns">
+          <button id="btnStream" class="primary">Stream on</button>
+          <button id="btnMarker">Marker</button>
+          <button id="btnSelftest">Self-test</button>
+          <button id="btnDeepSleep" class="warn">Deep-sleep test</button>
+        </div>
+        <div id="dashSelftest" class="mono small"></div>
+      </div>
+
+      <div class="dash-card">
+        <details id="dashKnobsBox">
+          <summary><b>Knob browser</b> <span class="muted">(all tunables)</span></summary>
+          <div class="ctl-btns" style="margin:6px 0">
+            <button id="btnKnobSave">SAVE to NVS</button>
+            <button id="btnKnobReset" class="warn">RESET defaults</button>
+          </div>
+          <div id="dashKnobs"></div>
+        </details>
+      </div>
+
+      <div class="dash-card">
+        <h2>Record</h2>
+        <div class="ctl-btns">
+          <label>Serial <input type="text" id="recSerial" value="unit"
+            style="width:110px"></label>
+          <button id="btnRecord" class="primary">Record</button>
+          <span id="recInfo" class="muted small"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script src="proto_consts.js"></script>
 <script src="proto.js"></script>
 <script src="mock.js"></script>
 <script src="app.js"></script>
+<script src="dashboard.js"></script>
 </body>
 </html>

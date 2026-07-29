@@ -28,7 +28,7 @@ from typing import List, Optional, Tuple, Union
 # ------------------------------------------------------------------ #
 
 PROTO_VER_MAJOR = 1
-PROTO_VER_MINOR = 0
+PROTO_VER_MINOR = 1  # 1.1: +TEST_LED_SWEEP_CONT, STATUS btn_pressed
 PROTO_VER = (PROTO_VER_MAJOR << 8) | PROTO_VER_MINOR
 
 # ATT payload budget at MTU 247
@@ -494,7 +494,7 @@ STF_LOWBATT_WARN = 1 << 7
 
 CLOCK_DRIFT_UNKNOWN = 0x7FFF  # clock_drift_ppm_x10 sentinel
 
-_STATUS = struct.Struct("<BBHBBBBBBHIHhIHB5s")
+_STATUS = struct.Struct("<BBHBBBBBBHIHhIHBB4s")
 assert _STATUS.size == STATUS_SIZE
 
 
@@ -516,19 +516,20 @@ class Status:
     uptime_s: int
     ibi_last_ms: int
     hr_bpm: int             # smoothed; 0 = none
-    reserved: bytes = b"\x00" * 5
+    btn_pressed: int = 0    # live GPIO2 level (proto 1.1; was reserved[0])
+    reserved: bytes = b"\x00" * 4
     extra: bytes = b""      # append-only tail from a newer firmware
 
 
 def build_status(s: Status) -> bytes:
-    if len(s.reserved) != 5:
-        raise ValueError("reserved must be 5 bytes")
+    if len(s.reserved) != 4:
+        raise ValueError("reserved must be 4 bytes")
     return _STATUS.pack(
         s.sys_state, s.flags, s.batt_mv, s.batt_pct, s.ppg_rate_code,
         s.led_ir_ma, s.led_red_ma, s.tia_gain_code, s.tia_cf_code,
         s.gate_duty_x100, s.notif_drop_count, s.i2c_err_count,
         s.clock_drift_ppm_x10, s.uptime_s, s.ibi_last_ms, s.hr_bpm,
-        s.reserved) + s.extra
+        s.btn_pressed, s.reserved) + s.extra
 
 
 def parse_status(buf: bytes) -> Status:
@@ -576,6 +577,7 @@ OP_TEST_BATT_RAW = 0xE7
 OP_TEST_ACCEL_LIVE = 0xE8
 OP_TEST_SLEEP_NOW = 0xE9
 OP_TEST_REPORT = 0xEA
+OP_TEST_LED_SWEEP_CONT = 0xEB
 
 OP_RESP_FLAG = 0x80
 FACTORY_MAGIC = 0x4E415242  # "NARB"
@@ -753,7 +755,7 @@ def parse_get_time_resp(payload: bytes) -> int:
 # ------------------------------------------------------------------ #
 
 KNOB_DISC_HDR_SIZE = 5
-KNOB_REC_FIXED = 19  # as defined in proto.h (see note in test suite)
+KNOB_REC_FIXED = 21  # id(2)+type+flags+4xi32(16)+name_len(1)
 
 # nc_knob_type_t
 KNOB_BOOL = 0

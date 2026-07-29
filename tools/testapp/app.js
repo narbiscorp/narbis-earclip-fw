@@ -105,14 +105,41 @@ if (typeof document !== "undefined") (() => {
     results: [],             /* report rows, one per step */
     otaPending: new Map(),   /* tid -> pending, OTA_CTRL indications    */
     flashing: false,         /* firmware update in progress             */
+    demoMode: false,         /* runtime mock via the Demo button        */
+    notifRefs: {},           /* charKey -> subscription refcount        */
+    logLines: [],            /* full-session verbose log (FIFO capped)  */
+    taps: {                  /* dashboard listeners (never guided-seq)  */
+      status: new Set(), event: new Set(), log: new Set(),
+    },
   };
 
   /* ---------------- logging ---------------- */
 
+  const LOG_CAP = 50000;     /* lines kept in memory (FIFO)             */
+
+  function hexBytes(b) {
+    let s = "";
+    for (let i = 0; i < b.length; i++) {
+      s += (b[i] < 16 ? "0" : "") + b[i].toString(16) + (i + 1 < b.length ? " " : "");
+    }
+    return s;
+  }
+
   function log(msg) {
+    const t = new Date();
+    const line = `[${t.toTimeString().slice(0, 8)}.` +
+      `${String(t.getMilliseconds()).padStart(3, "0")}] ${msg}`;
+    S.logLines.push(line);
+    if (S.logLines.length > LOG_CAP) {
+      S.logLines.splice(0, S.logLines.length - LOG_CAP);
+    }
+    for (const fn of S.taps.log) { try { fn(line); } catch (_) { /* tap */ } }
     const el = $("liveLog");
-    const t = new Date().toTimeString().slice(0, 8);
-    el.textContent += `[${t}] ${msg}\n`;
+    el.textContent += line + "\n";
+    /* keep the guided-pane DOM light; full log lives in S.logLines */
+    if (el.textContent.length > 300000) {
+      el.textContent = S.logLines.slice(-1500).join("\n") + "\n";
+    }
     el.scrollTop = el.scrollHeight;
   }
 
@@ -140,6 +167,7 @@ if (typeof document !== "undefined") (() => {
     S.tidNext = (S.tidNext + 1) & 0xFF;
     if (S.tidNext === 0) S.tidNext = 1;
     const bytes = NP.build[name](tid, ...args);
+    log(`-> ${NP.opName(bytes[0])} tid=${tid} [${hexBytes(bytes)}]`);
     const timeoutMs = opts.timeoutMs || 6000;
     return new Promise((resolve, reject) => {
       const arm = () => setTimeout(() => {
@@ -163,6 +191,9 @@ if (typeof document !== "undefined") (() => {
     let resp;
     try { resp = NP.parseControlResponse(ev.target.value); }
     catch (e) { log(`bad CONTROL indication: ${e.message}`); return; }
+    log(`<- ${NP.opName(resp.op)} tid=${resp.tid} ` +
+        `${NP.statusName(resp.status)}` +
+        (resp.payload.length ? ` +${resp.payload.length}B` : ""));
     const p = S.pending.get(resp.tid);
     if (!p) { log(`stray CONTROL resp op=${NP.opName(resp.op)} tid=${resp.tid}`); return; }
     if (resp.status !== P.ST_OK && !p.allowError) {
@@ -212,13 +243,23 @@ if (typeof document !== "undefined") (() => {
     }
   }
 
+  /* Refcounted: the dashboard tab holds long-lived subscriptions on the
+   * same characteristics guided steps use transiently — stopNotifications
+   * only when the last subscriber unsubscribes. */
   async function subscribe(charKey, handler) {
     const c = S.chars[charKey];
     c.addEventListener("characteristicvaluechanged", handler);
+    S.notifRefs[charKey] = (S.notifRefs[charKey] || 0) + 1;
     await c.startNotifications();
+    let done = false;
     return async () => {
-      try { await c.stopNotifications(); } catch (_) { /* link may be gone */ }
+      if (done) return;
+      done = true;
       c.removeEventListener("characteristicvaluechanged", handler);
+      S.notifRefs[charKey] = Math.max(0, (S.notifRefs[charKey] || 1) - 1);
+      if (S.notifRefs[charKey] === 0) {
+        try { await c.stopNotifications(); } catch (_) { /* link may be gone */ }
+      }
     };
   }
 
@@ -234,6 +275,7 @@ if (typeof document !== "undefined") (() => {
     S.tidNext = (S.tidNext + 1) & 0xFF;
     if (S.tidNext === 0) S.tidNext = 1;
     bytes[1] = tid;
+    log(`-> OTA_${name} tid=${tid} [${hexBytes(bytes.length > 20 ? bytes.subarray(0, 20) : bytes)}${bytes.length > 20 ? " …" : ""}]`);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         S.otaPending.delete(tid);
@@ -255,6 +297,9 @@ if (typeof document !== "undefined") (() => {
     try { resp = NP.parseControlResponse(ev.target.value); }
     catch (e) { log(`bad OTA indication: ${e.message}`); return; }
     const p = S.otaPending.get(resp.tid);
+    if (p) {
+      log(`<- OTA_${p.name} tid=${resp.tid} ${NP.statusName(resp.status)}`);
+    }
     if (!p) {
       /* unsolicited progress indications are informational */
       return;
@@ -413,7 +458,7 @@ if (typeof document !== "undefined") (() => {
 
   async function connect(reuseDevice) {
     banner(null);
-    S.bt = S.bt || (MOCK ? NarbisMock.create({ timescale: TS })
+    S.bt = S.bt || (MOCK ? NarbisMock.create({ timescale: TS, sim: true })
                          : navigator.bluetooth);
     if (!S.bt) {
       banner("Web Bluetooth is not available in this browser. Use Chrome/Edge " +
@@ -454,6 +499,8 @@ if (typeof document !== "undefined") (() => {
     S.chars.event = await svc.getCharacteristic(P.UUID.EVENT);
     S.chars.ppg = await svc.getCharacteristic(P.UUID.PPG);
     S.chars.accel = await svc.getCharacteristic(P.UUID.ACCEL);
+    S.chars.ibi = await svc.getCharacteristic(P.UUID.IBI);
+    S.notifRefs = {};
 
     /* protocol version gate: major mismatch = refuse politely */
     const pv = await (await svc.getCharacteristic(P.UUID.PROTO_VER)).readValue();
@@ -489,8 +536,13 @@ if (typeof document !== "undefined") (() => {
     await subscribe("control", onControlIndication);
     await subscribe("status", (ev) => {
       try { S.lastStatus = NP.parseStatus(ev.target.value); } catch (_) { return; }
+      const st = S.lastStatus;
+      log(`st: ${st.battMv}mV ${st.battPct}% ir=${st.ledIrMa} ` +
+          `red=${st.ledRedMa} rf=${st.tiaGainCode} hr=${st.hrBpm} ` +
+          `btn=${st.btnPressed} drops=${st.notifDropCount} up=${st.uptimeS}s`);
       updateHeader();
-      if (S.sinks.status) S.sinks.status(S.lastStatus);
+      if (S.sinks.status) S.sinks.status(st);
+      for (const fn of S.taps.status) { try { fn(st); } catch (_) { /* tap */ } }
     });
     await subscribe("event", (ev) => {
       let batch;
@@ -499,6 +551,9 @@ if (typeof document !== "undefined") (() => {
       }
       for (const rec of batch.events) {
         if (S.sinks.event) S.sinks.event(rec);
+        for (const fn of S.taps.event) {
+          try { fn(rec, batch.seq); } catch (_) { /* tap */ }
+        }
       }
     });
 
@@ -1352,8 +1407,26 @@ if (typeof document !== "undefined") (() => {
     banner(`Connect failed: ${e.message}`, "error");
     log(`connect failed: ${e.message}`);
   });
+  /* runtime mock: full simulate-mode device, real-time (timescale 1) */
+  $("btnDemo").onclick = () => {
+    if (S.server && S.server.connected) return;
+    S.demoMode = true;
+    S.bt = NarbisMock.create({ timescale: 1, sim: true });
+    $("mockBadge").classList.remove("hidden");
+    log("demo mode: simulated device (no hardware)");
+    connect().catch((e) => {
+      banner(`Demo connect failed: ${e.message}`, "error");
+      log(`demo connect failed: ${e.message}`);
+    });
+  };
   $("btnDisconnect").onclick = () => {
     if (S.server && S.server.connected) S.server.disconnect();
+    if (S.demoMode && !S.flashing) {
+      /* leave demo: next Connect uses the real chooser again */
+      S.demoMode = false;
+      S.bt = null;
+      if (!MOCK) $("mockBadge").classList.add("hidden");
+    }
   };
   $("btnStart").onclick = () => runSequence();
   $("btnSkip").onclick = () => { if (activeCtx) activeCtx._skip(); };
@@ -1366,6 +1439,15 @@ if (typeof document !== "undefined") (() => {
     $("mockBadge").classList.remove("hidden");
     document.title += " (mock)";
   }
+  /* ---- bridge for dashboard.js (same connection, same log) ---- */
+  window.NarbisApp = {
+    S, NP,
+    isMock: () => MOCK || S.demoMode,
+    ctrl, subscribe, fetchBlob, log, banner, hexBytes,
+    getLogLines: () => S.logLines,
+    onGuidedBusy: () => S.seqRunning || S.flashing,
+  };
+
   renderChecklist();
   if (!MOCK && !navigator.bluetooth) {
     banner("Web Bluetooth is not available here. Chrome/Edge on desktop or " +

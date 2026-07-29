@@ -10,6 +10,7 @@ idf_component_register(
         button.c
         charger.c
         console.c
+        dfu_legacy.c
         diag.c
         dsp_task.c
         i2c_bus.c
@@ -20,6 +21,7 @@ idf_component_register(
         power.c
         selftest_hw.c
         sys_task.c
+        test_led_ind.c
         test_ops.c
     INCLUDE_DIRS "."
     REQUIRES narbis_core

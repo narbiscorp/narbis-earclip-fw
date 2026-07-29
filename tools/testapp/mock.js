@@ -122,10 +122,25 @@ const NarbisMock = (() => {
       this._rate = P.RATE_100;
       this._streamMask = 0;
       this._ppgSeq = 0; this._accelSeq = 0; this._eventSeq = 0;
+      this._ibiSeq = 0;
       this._buttonEcho = false;
       this._chargerLive = false;
       this._accelLive = false;
       this._chargerFlags = 0;          /* STF bits reflected in STATUS */
+      /* live front-end state (STATUS + PPG DC respond to these) */
+      this._ledIr = 12; this._ledRed = 8; this._rf = 4;
+      this._agcFrozen = false;
+      this._battMv0 = 3921;            /* drains slowly in sim mode */
+      this._btnLevel = 0;              /* 1 = held (STATUS byte 27) */
+      this._sweep = { on: false, mask: 0, phaseS: 5, t0Us: 0 };
+      this._knobVals = new Map();      /* id -> value (set overrides def) */
+      this._worn = true;
+      this._gated = false;
+      /* sim mode: continuous physiology/motion generators (dashboard
+       * demo). OFF by default so the deterministic scripted walk that
+       * selfcheck section [2] asserts against stays byte-stable. */
+      this._sim = !!(opts && opts.sim);
+      if (this._sim) this._knobVals.set(0x0302, 1); /* amb_stream on */
       this._fwRev = "v0.9.0-mock";
       this._otaGen = 0;
       this._ota = { state: P.OTA_IDLE, size: 0, crc: 0, rx: 0, run: 0,
@@ -151,6 +166,7 @@ const NarbisMock = (() => {
     _onConnect() {
       /* STATUS at 1 Hz like the firmware sys_task */
       this._every(1000, () => this._pushStatus());
+      if (this._sim) this._startSim();
     }
     _disconnect(fromDevice) {
       if (!this._connected) return;
@@ -318,7 +334,7 @@ const NarbisMock = (() => {
       switch (op) {
         case P.OP_STREAM_START:
           this._streamMask |= pl[0];
-          if (pl[0] & P.STREAM_MASK_PPG) this._startPpg();
+          if (!this._sim && (pl[0] & P.STREAM_MASK_PPG)) this._startPpg();
           return ok();
         case P.OP_STREAM_STOP:
           this._streamMask &= ~pl[0];
@@ -350,9 +366,50 @@ const NarbisMock = (() => {
           const id = pl[0] | (pl[1] << 8);
           const k = P.KNOBS.find((x) => x.id === id);
           if (!k) return this._respond(op, tid, P.ST_BAD_PARAM);
+          const cur = this._knobVals.has(id) ? this._knobVals.get(id) : k.def;
           const out = new DataView(new ArrayBuffer(6));
-          out.setUint16(0, id, true); out.setInt32(2, k.def, true);
+          out.setUint16(0, id, true); out.setInt32(2, cur, true);
           return ok(new Uint8Array(out.buffer));
+        }
+        case P.OP_KNOB_SET: {
+          if (pl.length !== 6) return this._respond(op, tid, P.ST_BAD_LEN);
+          const d6 = new DataView(pl.buffer, pl.byteOffset);
+          const id = d6.getUint16(0, true), val = d6.getInt32(2, true);
+          const k = P.KNOBS.find((x) => x.id === id);
+          if (!k) return this._respond(op, tid, P.ST_BAD_PARAM);
+          if (val < k.min || val > k.max) {
+            return this._respond(op, tid, P.ST_OUT_OF_RANGE);
+          }
+          this._knobVals.set(id, val);
+          if (id === 0x0301) this._rate = val;       /* ppg_rate mirrors */
+          return this._respond(op, tid,
+            (k.flags & P.KF_REBOOT) ? P.ST_NEEDS_RESTART : P.ST_OK);
+        }
+        case P.OP_KNOB_SAVE:
+          return ok();
+        case P.OP_KNOB_RESET:
+          this._knobVals.clear();
+          if (this._sim) this._knobVals.set(0x0302, 1);
+          return ok();
+        case P.OP_AGC_FREEZE:
+          this._agcFrozen = !!pl[0];
+          return ok();
+        case P.OP_AGC_MANUAL: {
+          if (pl.length !== 4) return this._respond(op, tid, P.ST_BAD_LEN);
+          const [ir, red, rf, mask] = pl;
+          if ((mask & P.AGC_APPLY_IR) && ir > 50) {
+            return this._respond(op, tid, P.ST_OUT_OF_RANGE);
+          }
+          if ((mask & P.AGC_APPLY_RED) && red > 40) {
+            return this._respond(op, tid, P.ST_OUT_OF_RANGE);
+          }
+          if ((mask & P.AGC_APPLY_GAIN) && rf > 7) {
+            return this._respond(op, tid, P.ST_OUT_OF_RANGE);
+          }
+          if (mask & P.AGC_APPLY_IR) this._ledIr = ir;
+          if (mask & P.AGC_APPLY_RED) this._ledRed = red;
+          if (mask & P.AGC_APPLY_GAIN) this._rf = rf;
+          return ok();
         }
         case P.OP_SELFTEST_RUN:
           this._selftestRan = [];
@@ -461,6 +518,22 @@ const NarbisMock = (() => {
            * service (see _otaControl/_otaData) */
           this._streamMask = 0;
           return ok();
+        case P.OP_TEST_LED_SWEEP_CONT: {
+          /* {u8 mask b0 IR b1 RED, u8 enable, u8 phase_s (0 -> 5)} */
+          if (pl.length !== 3) return this._respond(op, tid, P.ST_BAD_LEN);
+          const [mask, enable, phaseS] = pl;
+          if (enable && !(mask & 3)) {
+            return this._respond(op, tid, P.ST_BAD_PARAM);
+          }
+          if (enable) {
+            this._agcFrozen = true;      /* proto.h: freezes AGC on start */
+            this._sweep = { on: true, mask: mask & 3,
+                            phaseS: phaseS || 5, t0Us: this._devUs() };
+          } else {
+            this._sweep.on = false;
+          }
+          return ok();
+        }
         case P.OP_TEST_SLEEP_NOW:
           ok();
           /* firmware sleeps in 10 s; link drops when it does */
@@ -563,23 +636,52 @@ const NarbisMock = (() => {
       return out;
     }
 
+    /* ---- live LED currents (manual/AGC value, or the 0xEB triangle) ---- */
+    _triMa(maxMa) {
+      const p = this._sweep.phaseS;
+      const t = ((this._devUs() - this._sweep.t0Us) / 1e6) % (4 * p);
+      if (t < p) return Math.round(maxMa * t / p);          /* ramp up   */
+      if (t < 2 * p) return maxMa;                          /* hold max  */
+      if (t < 3 * p) return Math.round(maxMa * (3 * p - t) / p); /* down */
+      return 0;                                             /* hold 0    */
+    }
+    _curMa() {
+      const s = this._sweep;
+      return {
+        ir: (s.on && (s.mask & 1)) ? this._triMa(50) : this._ledIr,
+        red: (s.on && (s.mask & 2)) ? this._triMa(40) : this._ledRed,
+      };
+    }
+    _battMv() {
+      /* sim: ~0.9 mV/s drain so the session graph visibly slopes */
+      const mv = this._sim
+        ? this._battMv0 - this._devUs() / 1e6 * 0.9 : this._battMv0;
+      return Math.max(3300, Math.round(mv));
+    }
+
     /* ---- STATUS ---- */
     _statusBytes() {
       const d = new DataView(new ArrayBuffer(P.STATUS_SIZE));
+      const ma = this._curMa();
+      const mv = this._battMv();
       d.setUint8(0, this._streamMask ? P.STATE_STREAMING : P.STATE_CONNECTED);
-      d.setUint8(1, P.STF_WORN | this._chargerFlags);
-      d.setUint16(2, 3921, true);
-      d.setUint8(4, 76);
+      d.setUint8(1, (this._worn ? P.STF_WORN : 0) | this._chargerFlags |
+                    (this._agcFrozen ? P.STF_AGC_FROZEN : 0) |
+                    (this._gated ? P.STF_GATE : 0));
+      d.setUint16(2, mv, true);
+      d.setUint8(4, Math.max(0, Math.min(100,
+        Math.round((mv - 3300) / (4200 - 3300) * 100))));
       d.setUint8(5, this._rate);
-      d.setUint8(6, 12); d.setUint8(7, 8);   /* LED mA */
-      d.setUint8(8, 4); d.setUint8(9, 2);    /* TIA RF/CF codes */
-      d.setUint16(10, 0, true);
+      d.setUint8(6, ma.ir); d.setUint8(7, ma.red);   /* LED mA */
+      d.setUint8(8, this._rf); d.setUint8(9, 2);     /* TIA RF/CF codes */
+      d.setUint16(10, this._gated ? 1200 : 0, true);
       d.setUint32(12, 0, true);
       d.setUint16(16, 0, true);
       d.setInt16(18, -23, true);
       d.setUint32(20, Math.floor(this._devUs() / 1e6), true);
-      d.setUint16(24, 833, true);
-      d.setUint8(26, 72);
+      d.setUint16(24, this._ibiLastMs || 833, true);
+      d.setUint8(26, this._hrBpm || 72);
+      d.setUint8(27, this._btnLevel);                /* proto 1.1 */
       return new Uint8Array(d.buffer);
     }
     _pushStatus() { this._char(P.UUID.STATUS)._push(this._statusBytes()); }
@@ -770,6 +872,263 @@ const NarbisMock = (() => {
         this._after(30, tick);
       };
       this._after(30, tick);
+    }
+
+    /* ================= SIMULATE MODE =================
+     * One catch-up engine (device-time scheduled, like the generators
+     * above) that makes every dashboard element move: PPG with synthetic
+     * beats + dicrotic notch whose DC tracks LED mA / TIA gain, accel
+     * gravity with drift + motion bursts, IBI per beat, AGC/gate/wear
+     * events, and a button press every ~20 s. Active only with
+     * opts.sim (never in the deterministic scripted walk). */
+
+    _pushIbi(recs) {
+      const out = new Uint8Array(P.IBI_HDR_SIZE + recs.length * P.IBI_REC_SIZE);
+      const d = new DataView(out.buffer);
+      d.setUint32(0, this._ibiSeq++, true);
+      d.setUint8(4, recs.length);
+      recs.forEach((r, i) => {
+        const off = P.IBI_HDR_SIZE + i * P.IBI_REC_SIZE;
+        d.setBigUint64(off, BigInt(r.tBeatUs), true);
+        d.setUint16(off + 8, r.ibiMs, true);
+        d.setUint8(off + 10, r.confidence);
+        d.setUint8(off + 11, r.flags);
+      });
+      this._char(P.UUID.IBI)._push(out);
+    }
+
+    _gateEvent(state, reason) {
+      const rec = new Uint8Array(2 + P.EVLEN_GATE);
+      const d = new DataView(rec.buffer);
+      rec[0] = P.EV_GATE; rec[1] = P.EVLEN_GATE;
+      d.setBigUint64(2, BigInt(this._devUs()), true);
+      d.setUint8(10, state); d.setUint8(11, reason);
+      return rec;
+    }
+    _wearEvent(worn) {
+      const rec = new Uint8Array(2 + P.EVLEN_WEAR);
+      const d = new DataView(rec.buffer);
+      rec[0] = P.EV_WEAR; rec[1] = P.EVLEN_WEAR;
+      d.setBigUint64(2, BigInt(this._devUs()), true);
+      d.setUint8(10, worn ? 1 : 0);
+      return rec;
+    }
+    _agcStepEvent(led, oldMa, newMa) {
+      const rec = new Uint8Array(2 + P.EVLEN_AGC_STEP);
+      const d = new DataView(rec.buffer);
+      rec[0] = P.EV_AGC_STEP; rec[1] = P.EVLEN_AGC_STEP;
+      d.setBigUint64(2, BigInt(this._devUs()), true);
+      d.setUint8(10, led); d.setUint8(11, oldMa); d.setUint8(12, newMa);
+      d.setUint8(13, this._rf); d.setUint8(14, this._rf);
+      return rec;
+    }
+
+    _startSim() {
+      if (this._simOn) return;
+      this._simOn = true;
+      const RF_OHMS = [5e5, 2.5e5, 1e5, 5e4, 2.5e4, 1e4, 1e6, 2e6];
+      const st = {
+        lastUs: this._devUs(),
+        beatPhase: 0, lastBeatUs: 0,
+        nextPpgUs: 0, nextAccUs: 0,
+        nextBurstUs: 8e6, burstEndUs: 0,
+        nextBtnUs: 12e6, btnUpUs: 0,
+        nextAgcUs: 3e6,
+        nextWearUs: 45e6, wearBackUs: 0,
+        theta: 0.3, phi: 0.8,
+      };
+      this._simSt = st;
+      const tick = () => {
+        if (!this._connected || !this._sim) { this._simOn = false; return; }
+        const now = this._devUs();
+
+        /* --- motion bursts (gate cause) --- */
+        if (!st.burstEndUs && now >= st.nextBurstUs) {
+          st.burstEndUs = now + 2e6;
+          if (this._streamMask & P.STREAM_MASK_EVENT) {
+            this._pushEvent(this._gateEvent(1, P.GATE_REASON_ACCEL));
+          }
+          this._gated = true;
+        }
+        if (st.burstEndUs && now >= st.burstEndUs) {
+          st.burstEndUs = 0;
+          st.nextBurstUs = now + (10 + this._rand() * 12) * 1e6;
+          if (this._streamMask & P.STREAM_MASK_EVENT) {
+            this._pushEvent(this._gateEvent(0, 0));
+          }
+          this._gated = false;
+        }
+        const burst = !!st.burstEndUs;
+
+        /* --- wear drop every ~45 s (3 s off-ear) --- */
+        if (!st.wearBackUs && now >= st.nextWearUs) {
+          st.wearBackUs = now + 3e6;
+          this._worn = false;
+          if (this._streamMask & P.STREAM_MASK_EVENT) {
+            this._pushEvent(this._wearEvent(false));
+          }
+        }
+        if (st.wearBackUs && now >= st.wearBackUs) {
+          st.wearBackUs = 0;
+          st.nextWearUs = now + (40 + this._rand() * 20) * 1e6;
+          this._worn = true;
+          if (this._streamMask & P.STREAM_MASK_EVENT) {
+            this._pushEvent(this._wearEvent(true));
+          }
+        }
+
+        /* --- button press ~20 s: active-low, marker_id = 1000+level --- */
+        if (!st.btnUpUs && now >= st.nextBtnUs) {
+          st.btnUpUs = now + 6e5;
+          this._btnLevel = 1;
+          if ((this._streamMask & P.STREAM_MASK_EVENT) || this._buttonEcho) {
+            this._pushEvent(this._markerRecord(P.MARKER_SRC_BUTTON, 1000));
+          }
+        }
+        if (st.btnUpUs && now >= st.btnUpUs) {
+          st.btnUpUs = 0;
+          st.nextBtnUs = now + (17 + this._rand() * 6) * 1e6;
+          this._btnLevel = 0;
+          if ((this._streamMask & P.STREAM_MASK_EVENT) || this._buttonEcho) {
+            this._pushEvent(this._markerRecord(P.MARKER_SRC_BUTTON, 1001));
+          }
+        }
+
+        /* --- AGC stepping while unfrozen (visible in events + STATUS) --- */
+        if (now >= st.nextAgcUs) {
+          st.nextAgcUs = now + (2 + this._rand() * 3) * 1e6;
+          if (!this._agcFrozen && (this._streamMask & P.STREAM_MASK_PPG)) {
+            const target = Math.round(18 + 6 * Math.sin(now / 47e6));
+            if (this._ledIr !== target) {
+              const oldMa = this._ledIr;
+              this._ledIr += this._ledIr < target ? 1 : -1;
+              if (this._streamMask & P.STREAM_MASK_EVENT) {
+                this._pushEvent(this._agcStepEvent(0, oldMa, this._ledIr));
+              }
+            }
+          }
+        }
+
+        /* --- PPG batches (50 ms) + beat clock + IBI --- */
+        const sps = P.RATE_SPS[this._rate];
+        const batchUs = 5e4;
+        if (!st.nextPpgUs) st.nextPpgUs = now + batchUs;
+        while ((this._streamMask & P.STREAM_MASK_PPG) && st.nextPpgUs <= now) {
+          const t0 = st.nextPpgUs - batchUs;
+          const n = Math.max(1, Math.round(sps * batchUs / 1e6));
+          const hasAmb = (this._knobVals.get(0x0302) || 0) === 1;
+          const stride = hasAmb ? 12 : 8;
+          const out = new Uint8Array(P.PPG_HDR_SIZE + n * stride);
+          const d = new DataView(out.buffer);
+          const ma = this._curMa();
+          const gainX = RF_OHMS[this._rf] / 2.5e4;
+          let dcIr = 12500 * ma.ir * gainX;
+          let dcRed = 14800 * ma.red * gainX;
+          let clipped = false;
+          if (dcIr > 4194303) { dcIr = 4194303; clipped = true; }
+          if (dcRed > 4194303) { dcRed = 4194303; clipped = true; }
+          if (!this._worn) { dcIr *= 0.05; dcRed *= 0.05; }
+          d.setUint32(0, this._ppgSeq++, true);
+          d.setBigUint64(4, BigInt(t0), true);
+          d.setUint8(12, this._rate);
+          d.setUint8(13, n);
+          d.setUint8(14, (hasAmb ? P.PPGF_AMB : 0) |
+                         (burst ? P.PPGF_GATE : 0) |
+                         (this._worn ? 0 : P.PPGF_WEAR_OFF) |
+                         (clipped ? P.PPGF_CLIPPED : 0));
+          for (let i = 0; i < n; i++) {
+            const tUs = t0 + i * 1e6 / sps;
+            /* beat clock: 60-75 bpm wander */
+            const hr = 67.5 + 7.5 * Math.sin(tUs / 37e6) +
+                       (this._rand() - 0.5) * 0.6;
+            st.beatPhase += hr / 60 / sps;
+            if (st.beatPhase >= 1) {
+              st.beatPhase -= 1;
+              const ibiMs = st.lastBeatUs
+                ? Math.round((tUs - st.lastBeatUs) / 1000) : 0;
+              st.lastBeatUs = tUs;
+              if (ibiMs > 250 && ibiMs < 2000) {
+                this._ibiLastMs = ibiMs;
+                this._hrBpm = Math.round(60000 / ibiMs);
+                if ((this._streamMask & P.STREAM_MASK_IBI) && this._worn) {
+                  this._pushIbi([{
+                    tBeatUs: Math.round(tUs), ibiMs,
+                    confidence: burst ? 34 : 82 + Math.round(this._rand() * 15),
+                    flags: burst ? P.IBIF_GATED_CTX : 0,
+                  }]);
+                }
+              }
+            }
+            const ph = st.beatPhase;
+            const pulse = Math.exp(-ph * 5) +
+                          0.35 * Math.exp(-Math.pow((ph - 0.45) / 0.09, 2));
+            const ampScale = burst ? 0.15 : 1;
+            const ir = Math.round(dcIr + dcIr * 0.049 * pulse * ampScale +
+                                  (this._rand() - 0.5) * 260 +
+                                  (burst ? (this._rand() - 0.5) * 3000 : 0));
+            const red = Math.round(dcRed + dcRed * 0.036 * pulse * ampScale +
+                                   (this._rand() - 0.5) * 260 +
+                                   (burst ? (this._rand() - 0.5) * 2200 : 0));
+            const off = P.PPG_HDR_SIZE + i * stride;
+            d.setInt32(off, Math.min(4194303, Math.max(0, ir)), true);
+            d.setInt32(off + 4, Math.min(4194303, Math.max(0, red)), true);
+            if (hasAmb) {
+              const amb = 900 + 130 * Math.sin(2 * Math.PI * 60 * tUs / 1e6) +
+                          (this._rand() - 0.5) * 80;
+              d.setInt32(off + 8, Math.max(0, Math.round(amb)), true);
+            }
+          }
+          this._char(P.UUID.PPG)._push(out);
+          st.nextPpgUs += batchUs;
+        }
+        if (!(this._streamMask & P.STREAM_MASK_PPG)) st.nextPpgUs = 0;
+
+        /* --- accel batches (200 ms at the knobbed ODR) --- */
+        const odrCode = this._knobVals.has(0x0801)
+          ? this._knobVals.get(0x0801) : 2;
+        const fsCode = this._knobVals.has(0x0802)
+          ? this._knobVals.get(0x0802) : 1;
+        const odrHz = P.ODR_HZ[odrCode] || 50;
+        const accBatchUs = 2e5;
+        if (!st.nextAccUs) st.nextAccUs = now + accBatchUs;
+        while ((this._streamMask & P.STREAM_MASK_ACCEL) && st.nextAccUs <= now) {
+          const t0 = st.nextAccUs - accBatchUs;
+          const n = Math.min(P.ACCEL_MAX_N,
+                             Math.max(1, Math.round(odrHz * accBatchUs / 1e6)));
+          const cpg = NP.fsCountsPerG(fsCode);
+          const out = new Uint8Array(P.ACCEL_HDR_SIZE + n * 6);
+          const d = new DataView(out.buffer);
+          d.setUint32(0, this._accelSeq++, true);
+          d.setBigUint64(4, BigInt(t0), true);
+          d.setUint8(12, odrCode);
+          d.setUint8(13, n);
+          d.setUint8(14, fsCode & P.ACCF_FS_MASK);
+          /* slow orientation drift */
+          st.theta += 0.0006; st.phi += 0.00023;
+          const g = [Math.sin(st.theta) * Math.cos(st.phi),
+                     Math.sin(st.theta) * Math.sin(st.phi),
+                     Math.cos(st.theta)];
+          for (let i = 0; i < n; i++) {
+            const tS = (t0 + i * 1e6 / odrHz) / 1e6;
+            for (let ax = 0; ax < 3; ax++) {
+              let v = g[ax] + (this._rand() - 0.5) * 0.04;
+              if (burst) {
+                v += 0.7 * Math.sin(2 * Math.PI * 6 * tS + ax * 2.1) +
+                     (this._rand() - 0.5) * 0.5;
+              }
+              d.setInt16(P.ACCEL_HDR_SIZE + i * 6 + ax * 2,
+                Math.max(-32768, Math.min(32767, Math.round(v * cpg))), true);
+            }
+          }
+          this._char(P.UUID.ACCEL)._push(out);
+          st.nextAccUs += accBatchUs;
+        }
+        if (!(this._streamMask & P.STREAM_MASK_ACCEL)) st.nextAccUs = 0;
+
+        st.lastUs = now;
+        this._after(25, tick);
+      };
+      this._after(25, tick);
     }
   }
 

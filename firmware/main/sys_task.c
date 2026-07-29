@@ -35,13 +35,16 @@
 #include "battery.h"
 #include "ble_iface.h"
 #include "board.h"
+#include "button.h"
 #include "charger.h"
+#include "dfu_legacy.h"
 #include "diag.h"
 #include "knobs_nvs.h"
 #include "ota.h"
 #include "power.h"
 #include "selftest.h"
 #include "sensor_types.h"
+#include "test_led_ind.h"
 #include "test_ops.h"
 
 #include "narbis/nc_acq_policy.h"
@@ -104,7 +107,10 @@ static int64_t s_offear_since = -1;   /* off-ear auto-sleep countdown   */
 #define WEAR_PROBE_ON_US   (5LL * 1000 * 1000)
 #define WEAR_PROBE_PERIOD_US (15LL * 1000 * 1000)
 static bool s_wear_probe;
-static int64_t s_probe_until, s_probe_next;
+#if !NARBIS_TEST_MODE
+static int64_t s_probe_until;         /* probe window end — prod only  */
+#endif
+static int64_t s_probe_next;
 static int64_t s_ota_enter_us;
 #define OTA_NO_BEGIN_TIMEOUT_US  (60LL * 1000000)
 #define BOOT_LOWBATT_ADV_US      (10LL * 1000000)
@@ -206,6 +212,7 @@ static void status_sync(bool force)
     st.uptime_s = (uint32_t)(esp_timer_get_time() / 1000000);
     st.ibi_last_ms = ag.ibi_last_ms;
     st.hr_bpm = ag.hr_bpm;
+    st.btn_pressed = button_is_pressed() ? 1 : 0;   /* proto 1.1 */
 
     uint8_t buf[NC_ATT_PAYLOAD_MAX];
     size_t len = nc_enc_status(buf, &st);
@@ -240,6 +247,9 @@ static void conn_sync(bool up)
 {
     s_connected = up;
     if (!up) {
+        /* Session-scoped TEST machinery first (0xEB sweep drives its
+         * LEDs to 0 here, in sys ctx). No-op in production builds. */
+        test_ops_on_disconnect();
         /* Session state dies with the link: subscriptions, stream
          * overrides and the AGC freeze are per-central. */
         s_in.sub_ppg = s_in.sub_accel = s_in.sub_ibi = false;
@@ -252,12 +262,16 @@ static void conn_sync(bool up)
         }
         if (s_state == NC_STATE_OTA) {
             /* Engine keeps the partial image for resume; the mode
-             * itself does not survive the link. */
+             * itself does not survive the link. (The legacy DFU engine
+             * aborts its own session on the host task.) */
             set_state(NC_STATE_IDLE);
         }
     }
     s_last_activity_us = esp_timer_get_time();
     demand();
+    /* TEST builds: repaint the LED connect indicator on the edge
+     * (steady on connect, pulse/re-arm on disconnect). */
+    test_led_ind_poll();
 }
 
 /* ------------------------------------------------------------------ */
@@ -453,6 +467,10 @@ static nc_ctrl_status_t cb_agc_manual(void *u, uint8_t ir_ma, uint8_t red_ma,
     if (!acq_ppg_running()) {
         return NC_ST_WRONG_STATE;
     }
+    /* LED-affecting op: the TEST connect indicator hands over (usually
+     * already RELEASED here since acquisition is running — kept for the
+     * contract's explicit op list). */
+    test_led_ind_release();
     const uint8_t old_ir = afe4404_cur_ir_ma();
     const uint8_t old_red = afe4404_cur_red_ma();
     const uint8_t old_rf = afe4404_cur_rf();
@@ -711,6 +729,45 @@ static void handle_agc(const sys_msg_t *m)
 /* ------------------------------------------------------------------ */
 /* Button gestures                                                     */
 /* ------------------------------------------------------------------ */
+#if NARBIS_TEST_MODE
+
+/* Vendor-bench map: the ONLY while-on gesture is hold >= 5 s ->
+ * orderly OFF. No marker / double-press / reboot gestures — operators
+ * cannot mis-trigger anything, and pairing is always open in TEST
+ * builds anyway (ble_gatt s_sec_open). Instant press/release feedback
+ * for the dashboard comes from the 0xE5 button-echo op, and STATUS
+ * carries the live debounced level in btn_pressed.
+ *
+ * Mechanics: DOWN arms the one-shot s_btn_tmr at 5 s, UP disarms it;
+ * if it fires, SYS_BTN_TIMEOUT lands here and we power off — guarded
+ * by the live debounced level so a lost UP edge (sys_q overflow)
+ * cannot fake a hold. */
+#define TEST_OFF_HOLD_US (5LL * 1000 * 1000)
+
+static void btn_run(nc_btn_ev_t ev, uint32_t t_ms)
+{
+    (void)t_ms;
+    switch (ev) {
+    case NC_BTN_EV_DOWN:
+        esp_timer_stop(s_btn_tmr);   /* INVALID_STATE when idle — ignored */
+        esp_timer_start_once(s_btn_tmr, TEST_OFF_HOLD_US);
+        break;
+    case NC_BTN_EV_UP:
+        esp_timer_stop(s_btn_tmr);   /* released before 5 s: no action */
+        break;
+    case NC_BTN_EV_TIMEOUT:
+        if (button_is_pressed()) {
+            orderly_off(false);
+        }
+        break;
+    default:
+        break;
+    }
+    s_last_activity_us = esp_timer_get_time();
+}
+
+#else /* !NARBIS_TEST_MODE — production gesture FSM */
+
 static void btn_run(nc_btn_ev_t ev, uint32_t t_ms)
 {
     uint32_t arm = 0;
@@ -746,6 +803,20 @@ static void btn_run(nc_btn_ev_t ev, uint32_t t_ms)
         break;
     }
     s_last_activity_us = esp_timer_get_time();
+}
+
+#endif /* NARBIS_TEST_MODE */
+
+/* ------------------------------------------------------------------ */
+/* test_ops.c (runs inline in sys ctx via cb_test_op) freezes AGC for  */
+/* the 0xEB sweep through the same path as NC_OP_AGC_FREEZE, so STATUS */
+/* shows NC_STF_AGC_FROZEN and conn teardown unfreezes as usual.       */
+/* Link-time contract (declared extern in test_ops.c).                 */
+/* ------------------------------------------------------------------ */
+void sys_agc_freeze_set(bool freeze)
+{
+    s_agc_frozen = freeze;
+    acq_set_agc_frozen(freeze);
 }
 
 /* ------------------------------------------------------------------ */
@@ -888,7 +959,11 @@ static void handle_tick(void)
      * AFE/accel I2C) — the esp_timer callback only marks it due. */
     ota_self_check_poll();
     if (s_state == NC_STATE_OTA) {
-        if (!ota_active() && now - s_ota_enter_us >= OTA_NO_BEGIN_TIMEOUT_US) {
+        /* A live LEGACY session must hold OTA state too, or acquisition
+         * restarts under its 4 KB page writes (dfu_legacy.c contract:
+         * acquisition stays stopped for the whole session). */
+        if (!ota_active() && !dfu_legacy_active() &&
+            now - s_ota_enter_us >= OTA_NO_BEGIN_TIMEOUT_US) {
             ESP_LOGW(TAG, "OTA: no BEGIN within 60 s — leaving OTA state");
             set_state(s_connected ? NC_STATE_CONNECTED : NC_STATE_IDLE);
         }
@@ -1072,10 +1147,15 @@ void sys_task_run(void *arg)
             conn_sync(m.u.flag);
             break;
         case SYS_ENTER_OTA:
-            /* OTA service saw a BEGIN without a prior CONTROL enter. */
+            /* OTA service (modern or legacy DFU) saw a BEGIN without a
+             * prior CONTROL enter. */
             s_ota_enter_us = esp_timer_get_time();
             set_state(NC_STATE_OTA);
             demand();              /* stop acquisition for flash writes */
+            break;
+        case SYS_TEST_IND:
+            /* TEST builds: LED connect-indicator tick (no-op in prod). */
+            test_led_ind_poll();
             break;
         default:
             ESP_LOGW(TAG, "unknown msg type %d", (int)m.type);

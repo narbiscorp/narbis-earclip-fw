@@ -11,9 +11,17 @@
  * pin low.
  */
 #pragma once
+#include <stdbool.h>
 #include "esp_err.h"
 
 /* Configure GPIO2 (input + internal pull-up + any-edge ISR), create the
  * debounce timer, and arm the light-sleep level wake. Call after sys_q
  * exists (confirmed edges are posted there). */
 esp_err_t button_init(void);
+
+/* Current DEBOUNCED level (true = held), i.e. the last confirmed edge
+ * posted to sys_task — not the raw pad. Any task. Starts false even if
+ * the wake press is still in progress at init (that press belongs to
+ * the wake gesture; its release is swallowed by design). Feeds
+ * nc_status_t.btn_pressed and the TEST hold-to-off guard. */
+bool button_is_pressed(void);
