@@ -17,6 +17,10 @@ $orig = Get-Content $board -Raw
 if ($orig -notmatch '#define NARBIS_TEST_MODE 0') {
     throw 'board.h is not in the expected production state (NARBIS_TEST_MODE 0)'
 }
+# Stamp BEFORE flipping board.h: the flip itself would make describe say
+# "-dirty" for every build. The TEST_MODE=1 delta is recorded separately
+# in the version line; the describe identifies the SOURCE tree.
+$ver = git -C $repo describe --tags --dirty --always
 try {
     Set-Content $board ($orig -replace '#define NARBIS_TEST_MODE 0',
                                       '#define NARBIS_TEST_MODE 1') -NoNewline
@@ -28,7 +32,6 @@ try {
 
     New-Item -ItemType Directory -Force $vendor | Out-Null
     Copy-Item build\merged-binary.bin (Join-Path $vendor 'narbis-earclip-functest.bin') -Force
-    $ver = git -C $repo describe --tags --dirty --always
     Set-Content (Join-Path $vendor 'narbis-earclip-functest.version.txt') `
         "narbis-earclip-functest.bin  |  $ver  |  built $(Get-Date -Format s)  |  NARBIS_TEST_MODE=1"
     Write-Host "OK -> vendor\narbis-earclip-functest.bin ($ver)"
