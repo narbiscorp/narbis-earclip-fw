@@ -1,4 +1,5 @@
 # Narbis Edge Earclip — build defaults (ESP-IDF v5.5.x, esp32c6)
+CONFIG_IDF_TARGET="esp32c6"
 
 # --- Bluetooth: NimBLE peripheral only ---
 CONFIG_BT_ENABLED=y

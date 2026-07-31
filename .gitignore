@@ -1,4 +1,5 @@
 firmware/build/
+firmware/build_factory/
 firmware/sdkconfig
 firmware/sdkconfig.old
 firmware/managed_components/

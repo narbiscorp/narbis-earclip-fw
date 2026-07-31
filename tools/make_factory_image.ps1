@@ -13,6 +13,13 @@ $vendor = Join-Path $repo 'vendor'
 . C:\Espressif\frameworks\esp-idf-v5.5.1\export.ps1 | Out-Null
 $ErrorActionPreference = 'Stop'
 
+# The factory image builds in its OWN build dir: (a) the developer's
+# firmware/build stays bound to whatever terminal/python configured it
+# (idf.py refuses env mismatches), and (b) the NARBIS_TEST_MODE flip
+# would otherwise force a near-full rebuild of the dev dir every run.
+$bdir = Join-Path $repo 'firmware\build_factory'
+function Invoke-Idf { python "$env:IDF_PATH\tools\idf.py" -B $bdir @args; if ($LASTEXITCODE -ne 0) { throw "idf.py $($args -join ' ') failed" } }
+
 $orig = Get-Content $board -Raw
 if ($orig -notmatch '#define NARBIS_TEST_MODE 0') {
     throw 'board.h is not in the expected production state (NARBIS_TEST_MODE 0)'
@@ -25,13 +32,11 @@ try {
     Set-Content $board ($orig -replace '#define NARBIS_TEST_MODE 0',
                                       '#define NARBIS_TEST_MODE 1') -NoNewline
     Set-Location (Join-Path $repo 'firmware')
-    idf.py build
-    if ($LASTEXITCODE -ne 0) { throw 'build failed' }
-    idf.py merge-bin
-    if ($LASTEXITCODE -ne 0) { throw 'merge-bin failed' }
+    Invoke-Idf build
+    Invoke-Idf merge-bin
 
     New-Item -ItemType Directory -Force $vendor | Out-Null
-    Copy-Item build\merged-binary.bin (Join-Path $vendor 'narbis-earclip-functest.bin') -Force
+    Copy-Item (Join-Path $bdir 'merged-binary.bin') (Join-Path $vendor 'narbis-earclip-functest.bin') -Force
     Set-Content (Join-Path $vendor 'narbis-earclip-functest.version.txt') `
         "narbis-earclip-functest.bin  |  $ver  |  built $(Get-Date -Format s)  |  NARBIS_TEST_MODE=1"
     Write-Host "OK -> vendor\narbis-earclip-functest.bin ($ver)"
