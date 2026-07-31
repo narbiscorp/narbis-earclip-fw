@@ -170,6 +170,10 @@ void acq_afe_task_run(void *arg)
     (void)arg;
     uint32_t i2c_fail_streak = 0;
 
+    /* Permanent TWDT subscription (see acq_ppg_start comment). Tolerate
+     * TWDT-disabled configs. */
+    (void)esp_task_wdt_add(NULL);
+
     for (;;) {
         /* WDT pattern while streaming: the queue wait is bounded at 1 s
          * so the loop always reaches esp_task_wdt_reset() well inside
@@ -289,17 +293,12 @@ esp_err_t acq_ppg_start(nc_rate_t rate)
     /* Full DSP-side reset (filters, IBI, gate, AGC shadow, wear, duty). */
     acq_dsp_request_reset(rate, true);
 
-    /* WDT covers the two hot tasks only while acquiring. Tolerate
-     * "not inited" (TWDT config off) and "already added". */
-    err = esp_task_wdt_add(g_acq_afe_task);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "wdt add afe: %s", esp_err_to_name(err));
-    }
-    err = esp_task_wdt_add(g_acq_dsp_task);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "wdt add dsp: %s", esp_err_to_name(err));
-    }
-
+    /* WDT: both hot tasks subscribe THEMSELVES permanently at task
+     * entry (bounded <=1 s waits mean they always feed it, streaming or
+     * idle). Dynamic add-on-start was removed after V2.1 first boot:
+     * an unsubscribed task calling esp_task_wdt_reset() makes IDF v5.5
+     * log "task not found" at E level — at dsp's 100 ms idle cadence
+     * that floods the console into looking like a dead board. */
     atomic_store(&s_ppg_running, true);
     err = gpio_intr_enable(PIN_ADC_RDY);
     ESP_LOGI(TAG, "ppg start @%u sps", nc_rate_sps(rate));
@@ -311,12 +310,11 @@ esp_err_t acq_ppg_stop(void)
     if (!atomic_load(&s_ppg_running)) {
         return ESP_OK;
     }
-    /* Order (spec): gate off producers, disarm ISR, drop WDT coverage,
-     * kill the AFE, then flush the partial batch. */
+    /* Order (spec): gate off producers, disarm ISR, kill the AFE, then
+     * flush the partial batch. (WDT subscription is permanent — the
+     * idle loops keep feeding it.) */
     atomic_store(&s_ppg_running, false);
     (void)gpio_intr_disable(PIN_ADC_RDY);
-    (void)esp_task_wdt_delete(g_acq_afe_task);
-    (void)esp_task_wdt_delete(g_acq_dsp_task);
 
     esp_err_t err = afe4404_powerdown_hw();
 

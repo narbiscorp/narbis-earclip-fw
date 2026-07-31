@@ -23,6 +23,8 @@ const char *diag_reset_reason_str(void)
     case ESP_RST_WDT:       return "other_wdt";
     case ESP_RST_DEEPSLEEP: return "deepsleep_wake";
     case ESP_RST_BROWNOUT:  return "brownout";
+    case ESP_RST_USB:       return "usb";       /* esptool / USB re-plug */
+    case ESP_RST_JTAG:      return "jtag";
     default:                return "unknown";
     }
 }

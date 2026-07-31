@@ -523,9 +523,12 @@ static void dsp_process(const nc_ppg_sample_t *s)
 void acq_dsp_task_run(void *arg)
 {
     (void)arg;
+    /* Permanent TWDT subscription — resetting while UNsubscribed makes
+     * IDF v5.5 log an E-level "task not found" every loop (10 Hz idle
+     * console flood, found on V2.1 first boot). */
+    (void)esp_task_wdt_add(NULL);
     for (;;) {
-        /* 100 ms receive timeout keeps the WDT fed across idle spans;
-         * ESP_ERR_NOT_FOUND while unsubscribed is expected + ignored. */
+        /* 100 ms receive timeout keeps the WDT fed across idle spans. */
         (void)esp_task_wdt_reset();
 
         uint32_t req = atomic_exchange(&s_reset_req, 0);

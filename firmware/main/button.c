@@ -98,12 +98,10 @@ esp_err_t button_init(void)
         return err;
     }
 
-    /* Acquisition tasks may have installed the shared GPIO ISR service
-     * already (ADC_RDY / INT1) — INVALID_STATE means "already up". */
-    err = gpio_install_isr_service(0);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        return err;
-    }
+    /* The shared GPIO ISR service is installed exactly once, by
+     * acq_init (app_tasks.c) — which always runs before button_init.
+     * Re-installing here would make the driver log a spurious E-level
+     * "already installed" on every boot. */
     err = gpio_isr_handler_add(PIN_BUTTON, btn_isr, NULL);
     if (err != ESP_OK) {
         return err;

@@ -125,10 +125,8 @@ static esp_err_t rdy_isr_attach(void)
     if (err != ESP_OK) {
         return err;
     }
-    err = gpio_install_isr_service(0);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        return err;                          /* INVALID_STATE = already up */
-    }
+    /* ISR service is installed once by acq_init, long before any
+     * selftest can run — do not re-install (spurious E-log). */
     return gpio_isr_handler_add(PIN_ADC_RDY, adc_rdy_isr, NULL);
 }
 
