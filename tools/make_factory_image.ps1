@@ -32,6 +32,8 @@ try {
     Set-Content $board ($orig -replace '#define NARBIS_TEST_MODE 0',
                                       '#define NARBIS_TEST_MODE 1') -NoNewline
     Set-Location (Join-Path $repo 'firmware')
+    Invoke-Idf reconfigure   # re-runs git describe: PROJECT_VER is cached
+                             # at configure time and would go stale
     Invoke-Idf build
     Invoke-Idf merge-bin
 
