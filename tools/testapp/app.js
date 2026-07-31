@@ -163,7 +163,7 @@ if (typeof document !== "undefined") (() => {
     clock: null,
     seqRunning: false, expectDisconnect: false,
     results: [],             /* report rows, one per step */
-    otaPending: new Map(),   /* tid -> pending, OTA_CTRL indications    */
+    otaPending: new Map(),   /* tid -> pending, OTA_CTRL responses    */
     flashing: false,         /* firmware update in progress             */
     demoMode: false,         /* runtime mock via the Demo button        */
     notifRefs: {},           /* charKey -> subscription refcount        */
@@ -219,9 +219,9 @@ if (typeof document !== "undefined") (() => {
     return c.writeValue(bytes);
   }
 
-  /* Send one CONTROL request; resolve on the correlated indication.
+  /* Send one CONTROL request; resolve on the correlated response notification.
    * opts.until lets long ops (rate count) swallow the immediate ack and
-   * wait for the completion indication that reuses the same tid. */
+   * wait for the completion notification that reuses the same tid. */
   function ctrl(name, args = [], opts = {}) {
     const tid = S.tidNext;
     S.tidNext = (S.tidNext + 1) & 0xFF;
@@ -250,7 +250,7 @@ if (typeof document !== "undefined") (() => {
   function onControlIndication(ev) {
     let resp;
     try { resp = NP.parseControlResponse(ev.target.value); }
-    catch (e) { log(`bad CONTROL indication: ${e.message}`); return; }
+    catch (e) { log(`bad CONTROL response: ${e.message}`); return; }
     log(`<- ${NP.opName(resp.op)} tid=${resp.tid} ` +
         `${NP.statusName(resp.status)}` +
         (resp.payload.length ? ` +${resp.payload.length}B` : ""));
@@ -352,13 +352,13 @@ if (typeof document !== "undefined") (() => {
   function onOtaIndication(ev) {
     let resp;
     try { resp = NP.parseControlResponse(ev.target.value); }
-    catch (e) { log(`bad OTA indication: ${e.message}`); return; }
+    catch (e) { log(`bad OTA response: ${e.message}`); return; }
     const p = S.otaPending.get(resp.tid);
     if (p) {
       log(`<- OTA_${p.name} tid=${resp.tid} ${NP.statusName(resp.status)}`);
     }
     if (!p) {
-      /* unsolicited progress indications are informational */
+      /* unsolicited progress notifications are informational */
       return;
     }
     clearTimeout(p.timer);
@@ -591,7 +591,7 @@ if (typeof document !== "undefined") (() => {
       S.battPct = bl.getUint8(0);
     } catch (_) { log("battery service not available"); }
 
-    /* always-on subscriptions: CONTROL indications, STATUS, EVENT */
+    /* always-on subscriptions: CONTROL responses, STATUS, EVENT */
     await subscribe("control", onControlIndication);
     await subscribe("status", (ev) => {
       try { S.lastStatus = NP.parseStatus(ev.target.value); } catch (_) { return; }

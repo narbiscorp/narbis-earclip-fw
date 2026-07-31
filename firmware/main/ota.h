@@ -3,7 +3,7 @@
  *
  * Transport: ble_ota_iface.h (OTA_CTRL writes -> control cb, OTA_DATA
  * write-no-response -> data cb, responses/progress via
- * ble_ota_submit_ind). Both callbacks run in the NimBLE host task; the
+ * ble_ota_submit_resp). Both callbacks run in the NimBLE host task; the
  * engine is internally mutexed, so sys_task may call ota_active()/
  * ota_deadline_check() concurrently.
  */

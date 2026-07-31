@@ -628,7 +628,7 @@ static void handle_ctrl(const sys_msg_t *m)
     uint8_t resp[NC_ATT_PAYLOAD_MAX];
     size_t rlen = nc_ctrl_dispatch(&s_ctrl, m->u.ctrl.buf, m->u.ctrl.len, resp);
     if (rlen > 0) {
-        ble_tx_submit(BLE_CH_CTRL_IND, resp, (uint16_t)rlen);
+        ble_tx_submit(BLE_CH_CTRL_RESP, resp, (uint16_t)rlen);
     }
     s_last_activity_us = esp_timer_get_time();
 

@@ -58,7 +58,7 @@ const NarbisProto = (() => {
     return out;
   }
 
-  /* Response indication [u8 op|0x80][u8 tid][u8 status][payload].
+  /* Response notification [u8 op|0x80][u8 tid][u8 status][payload].
    * TEST opcodes (>= 0xE0) already carry bit7: the firmware echoes the
    * opcode UNCHANGED; correlation for those is by tid alone. */
   function parseControlResponse(buf) {

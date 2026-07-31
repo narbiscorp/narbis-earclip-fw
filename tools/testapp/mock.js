@@ -232,7 +232,7 @@ const NarbisMock = (() => {
       }
       if (bytes.length < 2) throw new Error("mock: control write too short");
       const op = bytes[0], tid = bytes[1], pl = bytes.slice(2);
-      /* dispatch out of the write context, like a real indication */
+      /* dispatch out of the write context, like a real response notification */
       this._after(25, () => this._control(op, tid, pl));
     }
 

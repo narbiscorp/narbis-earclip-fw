@@ -866,7 +866,7 @@ if (typeof document !== "undefined" && document.getElementById("dashPane"))
         setTimeout(() => { S.taps.event.delete(tap); res(); }, 4000);
       });
       /* real firmware blocks sys_task ~4.5 s for the full mask — the
-       * CONTROL indication arrives only after it finishes */
+       * CONTROL response arrives only after it finishes */
       await A.ctrl("selftestRun", [0], { timeoutMs: 20000 });
       await done;
       const blob = await A.fetchBlob("selftestResult");

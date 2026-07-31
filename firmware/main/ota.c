@@ -100,7 +100,7 @@ static void ota_respond(uint8_t op, uint8_t tid, uint8_t st,
     if (pl_len) {
         memcpy(buf + 3, pl, pl_len);
     }
-    ble_ota_submit_ind(buf, (uint16_t)(3 + pl_len));
+    ble_ota_submit_resp(buf, (uint16_t)(3 + pl_len));
 }
 
 /* Unsolicited progress: an NC_OTA_STATUS response with tid 0 (tid 0 is

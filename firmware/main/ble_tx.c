@@ -1,26 +1,30 @@
 /*
  * ble_tx.c — the single notifier task (handoff §5.4).
  *
- * Every outbound notification/indication funnels through per-channel
- * staging rings here; producers (sys/dsp/afe/imu tasks) only ever
- * memcpy into a ring under a short critical section and never touch
- * NimBLE. One task (prio 15) drains the rings in priority order:
+ * Every outbound notification funnels through per-channel staging
+ * rings here; producers (sys/dsp/afe/imu tasks) only ever memcpy into
+ * a ring under a short critical section and never touch NimBLE. One
+ * task (prio 15) drains the rings in priority order:
  *
- *   CTRL_IND, OTA_IND, EVENT, IBI, STATUS, PPG, ACCEL
+ *   CTRL_RESP, OTA_RESP, EVENT, IBI, STATUS, PPG, ACCEL
+ *
+ * Everything is a NOTIFICATION — including both response channels.
+ * Indications are banned in this peripheral-only build: BLE_GATTC=0
+ * compiles out NimBLE's CFM/timeout handlers, so an indication's ack
+ * never surfaces and each ble_gatts_indicate_custom() leaks one of
+ * the CONFIG_BT_NIMBLE_GATT_MAX_PROCS (4) procs; after four sends
+ * every send ENOMEMs and the drain livelocks (V2.1 first functional
+ * test, 2026-07-31: one control response per 35 s, then total TX
+ * starvation). Response delivery assurance is protocol-level (tid
+ * echo + client retry), not transport-level.
  *
  * Flow control:
  *  - BLE_HS_ENOMEM/EAGAIN/EBUSY/EALREADY from a send are transient
- *    (msys mbuf pool exhausted or an indication still in flight): the
- *    packet goes back to the head of its ring, we wait on the binary
- *    semaphore that ble_tx_on_notify_tx() gives (every NOTIFY_TX event
- *    frees resources), and retry; after two failed retries the drain
- *    pass ends and the outer 100 ms wait takes over.
- *  - Indications (CTRL_IND, OTA_IND): NimBLE allows exactly ONE
- *    outstanding indication per connection, so after a successful
- *    indicate we stop serving indication channels until ble_gatt.c
- *    observes the ack/timeout (NOTIFY_TX with .indication=1) and
- *    clears its in-flight flag — ble_gatt_tx_chan_ready() reports the
- *    indication channels not-ready while the flag is set.
+ *    (msys mbuf pool exhausted): the packet goes back to the head of
+ *    its ring, we wait on the binary semaphore that
+ *    ble_tx_on_notify_tx() gives (every NOTIFY_TX event frees
+ *    resources), and retry; after two failed retries the drain pass
+ *    ends and the outer 100 ms wait takes over.
  *  - Other send errors drop the packet (g_diag.notify_drop).
  *
  * Ring policy: on a full ring the OLDEST staged packet is dropped
@@ -37,7 +41,7 @@
 
 #include "esp_log.h"
 
-#include "host/ble_hs.h"          /* ble_gatts_notify/indicate_custom,
+#include "host/ble_hs.h"          /* ble_gatts_notify_custom,
                                      ble_hs_mbuf_from_flat, BLE_HS_E* */
 
 #include "ble_iface.h"
@@ -47,13 +51,6 @@
 #include "narbis/proto.h"
 
 static const char *TAG = "ble_tx";
-
-/* Private surface into ble_gatt.c beyond ble_iface.h (link-time
- * contract between the two BLE-layer files, same idiom as the
- * sys_task.c externs): marks the one-outstanding-indication window so
- * ble_gatt_tx_chan_ready() holds back the second indication channel
- * between our indicate call and the peer's ack. */
-extern void ble_gatt_ind_inflight_set(bool inflight);
 
 /* ------------------------------------------------------------------ */
 /* Staging rings                                                       */
@@ -74,13 +71,13 @@ typedef struct {
     static uint8_t name##_buf[slots][SLOT_SZ]; \
     static uint16_t name##_len[slots]
 
-DEF_RING_STORAGE(s_ctrl, 4);       /* BLE_CH_CTRL_IND  */
+DEF_RING_STORAGE(s_ctrl, 4);       /* BLE_CH_CTRL_RESP */
 DEF_RING_STORAGE(s_event, 8);      /* BLE_CH_EVENT     */
 DEF_RING_STORAGE(s_ibi, 8);        /* BLE_CH_IBI       */
 DEF_RING_STORAGE(s_status, 1);     /* BLE_CH_STATUS — latest wins */
 DEF_RING_STORAGE(s_ppg, 8);        /* BLE_CH_PPG       */
 DEF_RING_STORAGE(s_accel, 4);      /* BLE_CH_ACCEL     */
-DEF_RING_STORAGE(s_ota, 2);        /* BLE_TX_CH_OTA_IND */
+DEF_RING_STORAGE(s_ota, 2);        /* BLE_TX_CH_OTA_RESP */
 
 #define RING_INIT(name, slots, drops) \
     { .buf = name##_buf, .len = name##_len, .n_slots = (slots), \
@@ -88,18 +85,18 @@ DEF_RING_STORAGE(s_ota, 2);        /* BLE_TX_CH_OTA_IND */
       .mux = portMUX_INITIALIZER_UNLOCKED }
 
 static tx_ring_t s_rings[BLE_TX_CH_TOTAL] = {
-    [BLE_CH_CTRL_IND]  = RING_INIT(s_ctrl, 4, true),
+    [BLE_CH_CTRL_RESP] = RING_INIT(s_ctrl, 4, true),
     [BLE_CH_EVENT]     = RING_INIT(s_event, 8, true),
     [BLE_CH_IBI]       = RING_INIT(s_ibi, 8, true),
     [BLE_CH_STATUS]    = RING_INIT(s_status, 1, false),
     [BLE_CH_PPG]       = RING_INIT(s_ppg, 8, true),
     [BLE_CH_ACCEL]     = RING_INIT(s_accel, 4, true),
-    [BLE_TX_CH_OTA_IND] = RING_INIT(s_ota, 2, true),
+    [BLE_TX_CH_OTA_RESP] = RING_INIT(s_ota, 2, true),
 };
 
 /* Drain priority (design contract: control-plane first, streams last). */
 static const uint8_t s_drain_order[BLE_TX_CH_TOTAL] = {
-    BLE_CH_CTRL_IND, BLE_TX_CH_OTA_IND, BLE_CH_EVENT, BLE_CH_IBI,
+    BLE_CH_CTRL_RESP, BLE_TX_CH_OTA_RESP, BLE_CH_EVENT, BLE_CH_IBI,
     BLE_CH_STATUS, BLE_CH_PPG, BLE_CH_ACCEL,
 };
 
@@ -207,11 +204,11 @@ bool ble_tx_submit(ble_chan_t ch, const uint8_t *pkt, uint16_t len)
     return tx_stage((int)ch, pkt, len);
 }
 
-/* OTA_CTRL response indications ride the dedicated 2-slot ring drained
- * right after BLE_CH_CTRL_IND (ble_ota_iface.h contract). */
-bool ble_ota_submit_ind(const uint8_t *pkt, uint16_t len)
+/* OTA_CTRL responses ride the dedicated 2-slot ring drained right
+ * after BLE_CH_CTRL_RESP (ble_ota_iface.h contract). */
+bool ble_ota_submit_resp(const uint8_t *pkt, uint16_t len)
 {
-    return tx_stage(BLE_TX_CH_OTA_IND, pkt, len);
+    return tx_stage(BLE_TX_CH_OTA_RESP, pkt, len);
 }
 
 /* ------------------------------------------------------------------ */
@@ -242,11 +239,10 @@ static bool drain_channel(int ch)
 
     while (ring_has_data(ch)) {
         uint16_t conn = 0, vh = 0;
-        bool is_ind = false;
-        if (!ble_gatt_tx_chan_ready(ch, &conn, &vh, &is_ind)) {
-            /* Disconnected / unsubscribed / enc-gated / indication in
-             * flight: leave the packets staged (drop-oldest bounds
-             * them; disconnect flushes them). */
+        if (!ble_gatt_tx_chan_ready(ch, &conn, &vh)) {
+            /* Disconnected / unsubscribed / enc-gated: leave the
+             * packets staged (drop-oldest bounds them; disconnect
+             * flushes them). */
             return true;
         }
         if (!ring_pop(ch, pkt, &len)) {
@@ -263,28 +259,12 @@ static bool drain_channel(int ch)
             continue;
         }
 
-        int rc;
-        if (is_ind) {
-            /* Flag BEFORE the call: the ack can race the return. */
-            ble_gatt_ind_inflight_set(true);
-            rc = ble_gatts_indicate_custom(conn, vh, om);
-        } else {
-            rc = ble_gatts_notify_custom(conn, vh, om);
-        }
-        /* Both calls consume om on every path (verified in ble_gattc.c). */
+        /* Consumes om on every path (verified in ble_gattc.c). */
+        int rc = ble_gatts_notify_custom(conn, vh, om);
 
         if (rc == 0) {
             retries = 0;
-            if (is_ind) {
-                /* One indication at a time on the whole link; the ack
-                 * (NOTIFY_TX .indication=1) reopens the gate. */
-                return true;
-            }
             continue;
-        }
-
-        if (is_ind) {
-            ble_gatt_ind_inflight_set(false);
         }
 
         if (rc == BLE_HS_ENOTCONN) {

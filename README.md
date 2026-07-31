@@ -72,7 +72,10 @@ and mirrored byte-exactly by `tools/narbis_client/proto.py` and
 `tools/testapp/proto.js` (cross-verified fixtures). Services: Battery 0x180F,
 Device Info 0x180A, Heart Rate 0x180D (RR intervals from the IBI engine),
 Narbis Sensor Service (PPG / ACCEL / IBI / EVENT streams, STATUS, CONTROL
-write+indicate, PROTOCOL_VERSION), OTA service. Name "Narbis Edge Earclip";
+write+notify, PROTOCOL_VERSION), OTA service. All subscribable chars are
+notifications — indications are unusable in this peripheral-only NimBLE
+build (BLE_GATTC=0: acks compiled out, GATT procs leak; ble_gatt.c).
+Name "Narbis Edge Earclip";
 128-bit service UUID in the ADV payload, full name in the scan response;
 2M PHY + DLE + MTU 247 requested after connect. Bonding is LE Secure
 Connections; pairing only during the button double-press window

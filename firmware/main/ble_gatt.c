@@ -5,9 +5,15 @@
  * Split of responsibilities: this file owns everything that runs on
  * the NimBLE host task (GAP events, access callbacks) plus the public
  * ble_iface.h surface; ble_tx.c owns the single notifier task that
- * drains the staging rings. The private handshake between the two is
- * the appended section of ble_iface.h plus ble_gatt_ind_inflight_set()
- * (link-time contract, declared locally in ble_tx.c).
+ * drains the staging rings (appended section of ble_iface.h).
+ *
+ * Every subscribable characteristic is NOTIFY — indications are banned
+ * in this build: BLE_GATTC=0 compiles out NimBLE's CFM/timeout
+ * handlers, so an indication's ack never surfaces and each send leaks
+ * a GATT proc until the pool (4) is gone and all sends ENOMEM (found
+ * on V2.1 first functional test, 2026-07-31: one control response per
+ * 35 s, then total TX starvation). Delivery assurance is protocol-
+ * level: tid echo + per-step retry in the clients.
  *
  * Security model (handoff §5.4 + Devon decision 3):
  *  - LE Secure Connections, Just Works (no I/O), bonding on.
@@ -91,10 +97,6 @@ static const char *TAG = "ble";
 #define CONN_ITVL_SLOW_MAX   40     /* 50 ms   */
 #define CONN_TIMEOUT_10MS    400    /* 4 s supervision timeout */
 
-/* ATT transaction timeout is 30 s; past this an un-acked indication is
- * gone (event lost) — release the gate rather than wedge the channel. */
-#define IND_STALE_US         (35LL * 1000 * 1000)
-
 /* ------------------------------------------------------------------ */
 /* State                                                               */
 /* ------------------------------------------------------------------ */
@@ -106,9 +108,6 @@ static bool s_peer_was_bonded;         /* host task only */
 static volatile bool s_sub_ppg, s_sub_accel, s_sub_ibi, s_sub_event;
 static volatile bool s_sub_status, s_sub_ctrl, s_sub_hrs, s_sub_batt;
 static volatile bool s_sub_ota;
-
-static volatile bool s_ind_inflight;
-static volatile int64_t s_ind_since_us;
 
 static volatile bool s_window_open;
 static bool s_sec_open;                /* open_pairing knob || TEST_MODE */
@@ -245,7 +244,14 @@ static struct ble_gatt_chr_def s_chr_narbis[] = {
       .val_handle = &s_vh_status },
     { .uuid = &s_uuid_ctrl.u, .access_cb = chr_access,
       .arg = CHR_ARG(CHR_ID_CTRL),
-      .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_INDICATE,
+      /* NOTIFY, deliberately not INDICATE: this build is peripheral-only
+       * (no CONFIG_BT_NIMBLE_GATT_CLIENT), and NimBLE compiles the
+       * indication CFM/timeout handlers out under BLE_GATTC=0 — the ack
+       * never surfaces and every indicate leaks one of the 4 GATT procs
+       * until sends ENOMEM forever (V2.1 first functional test,
+       * 2026-07-31). Delivery assurance lives in the protocol: tid
+       * echo + per-step retry. */
+      .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_NOTIFY,
       .val_handle = &s_vh_ctrl },
     { .uuid = &s_uuid_pver.u, .access_cb = chr_access,
       .arg = CHR_ARG(CHR_ID_PVER), .flags = BLE_GATT_CHR_F_READ,
@@ -256,7 +262,8 @@ static struct ble_gatt_chr_def s_chr_narbis[] = {
 static struct ble_gatt_chr_def s_chr_ota[] = {
     { .uuid = &s_uuid_ota_ctrl.u, .access_cb = chr_access,
       .arg = CHR_ARG(CHR_ID_OTA_CTRL),
-      .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_INDICATE,
+      /* NOTIFY not INDICATE — same BLE_GATTC=0 trap as the CTRL char. */
+      .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_NOTIFY,
       .val_handle = &s_vh_ota_ctrl },
     { .uuid = &s_uuid_ota_data.u, .access_cb = chr_access,
       .arg = CHR_ARG(CHR_ID_OTA_DATA),
@@ -325,11 +332,11 @@ static void post_sub_change(void)
     (void)sys_post(&m);
 }
 
-/* CONTROL protocol-level error, staged as an indication. */
-static void ctrl_err_ind(uint8_t op, uint8_t tid, uint8_t st)
+/* CONTROL protocol-level error, staged as a notification. */
+static void ctrl_err_resp(uint8_t op, uint8_t tid, uint8_t st)
 {
     uint8_t r[3] = { (uint8_t)(op | NC_OP_RESP_FLAG), tid, st };
-    (void)ble_tx_submit(BLE_CH_CTRL_IND, r, sizeof(r));
+    (void)ble_tx_submit(BLE_CH_CTRL_RESP, r, sizeof(r));
 }
 
 /* ------------------------------------------------------------------ */
@@ -387,18 +394,18 @@ static int ctrl_write(uint16_t conn_handle, struct ble_gatt_access_ctxt *ctxt)
         return rc;
     }
     if (len < 2) {
-        ctrl_err_ind(0x00, 0x00, NC_ST_BAD_LEN);   /* [0x80][0][BAD_LEN] */
+        ctrl_err_resp(0x00, 0x00, NC_ST_BAD_LEN);   /* [0x80][0][BAD_LEN] */
         return 0;
     }
     if (len > SYS_CTRL_REQ_MAX) {
-        ctrl_err_ind(s_ctrl_wbuf[0], s_ctrl_wbuf[1], NC_ST_BAD_LEN);
+        ctrl_err_resp(s_ctrl_wbuf[0], s_ctrl_wbuf[1], NC_ST_BAD_LEN);
         return 0;
     }
     sys_msg_t m = { .type = SYS_CTRL_REQ };
     m.u.ctrl.len = (uint8_t)len;
     memcpy(m.u.ctrl.buf, s_ctrl_wbuf, len);
     if (!sys_post(&m)) {
-        ctrl_err_ind(s_ctrl_wbuf[0], s_ctrl_wbuf[1], NC_ST_BUSY);
+        ctrl_err_resp(s_ctrl_wbuf[0], s_ctrl_wbuf[1], NC_ST_BUSY);
     }
     return 0;
 }
@@ -645,7 +652,6 @@ static void clear_link_state(void)
     s_sub_ota = false;
     s_encrypted = false;
     s_peer_was_bonded = false;
-    s_ind_inflight = false;
     s_mtu = 23;
 }
 
@@ -697,28 +703,26 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_SUBSCRIBE: {
         const uint16_t ah = event->subscribe.attr_handle;
         const bool cn = event->subscribe.cur_notify;
-        const bool ci = event->subscribe.cur_indicate;
+        /* Every subscribable char here is notify-only. A central whose
+         * GATT cache remembers the pre-2026-07-31 indicate CTRL char
+         * will fail its CCCD write and must re-discover (forget/re-pair
+         * or toggle Bluetooth) — acceptable: nothing shipped. */
         if (ah == s_vh_ppg)            s_sub_ppg = cn;
         else if (ah == s_vh_accel)     s_sub_accel = cn;
         else if (ah == s_vh_ibi)       s_sub_ibi = cn;
         else if (ah == s_vh_event)     s_sub_event = cn;
         else if (ah == s_vh_status)    s_sub_status = cn;
-        else if (ah == s_vh_ctrl)      s_sub_ctrl = ci;
+        else if (ah == s_vh_ctrl)      s_sub_ctrl = cn;
         else if (ah == s_vh_hrs)       s_sub_hrs = cn;
         else if (ah == s_vh_batt)      s_sub_batt = cn;
-        else if (ah == s_vh_ota_ctrl)  s_sub_ota = ci;
+        else if (ah == s_vh_ota_ctrl)  s_sub_ota = cn;
         post_sub_change();
         ble_tx_on_notify_tx();     /* fresh CCCD: kick the drain */
         return 0;
     }
 
     case BLE_GAP_EVENT_NOTIFY_TX:
-        /* For indications the event only fires at completion (EDONE /
-         * ETIMEOUT / synchronous error) — verified in ble_gattc.c. */
-        if (event->notify_tx.indication && event->notify_tx.status != 0) {
-            s_ind_inflight = false;
-        }
-        ble_tx_on_notify_tx();
+        ble_tx_on_notify_tx();     /* resources freed: kick the drain */
         return 0;
 
     case BLE_GAP_EVENT_MTU:
@@ -1100,31 +1104,30 @@ void ble_ota_register(ble_ota_ctrl_cb_t ctrl_cb, ble_ota_data_cb_t data_cb)
 /* ------------------------------------------------------------------ */
 /* Private surface for ble_tx.c — ble_iface.h appended section         */
 /* ------------------------------------------------------------------ */
-bool ble_gatt_tx_chan_ready(int tx_ch, uint16_t *conn, uint16_t *val_handle,
-                            bool *is_indication)
+bool ble_gatt_tx_chan_ready(int tx_ch, uint16_t *conn, uint16_t *val_handle)
 {
     const uint16_t c = s_conn;
     if (c == BLE_HS_CONN_HANDLE_NONE) {
         return false;
     }
 
-    bool sub = false, ind = false;
+    bool sub = false;
     uint16_t vh = 0;
     switch (tx_ch) {
-    case BLE_CH_CTRL_IND:
-        sub = s_sub_ctrl;  vh = s_vh_ctrl;     ind = true;  break;
+    case BLE_CH_CTRL_RESP:
+        sub = s_sub_ctrl;  vh = s_vh_ctrl;     break;
     case BLE_CH_EVENT:
-        sub = s_sub_event; vh = s_vh_event;                 break;
+        sub = s_sub_event; vh = s_vh_event;    break;
     case BLE_CH_IBI:
-        sub = s_sub_ibi;   vh = s_vh_ibi;                   break;
+        sub = s_sub_ibi;   vh = s_vh_ibi;      break;
     case BLE_CH_STATUS:
-        sub = s_sub_status; vh = s_vh_status;               break;
+        sub = s_sub_status; vh = s_vh_status;  break;
     case BLE_CH_PPG:
-        sub = s_sub_ppg;   vh = s_vh_ppg;                   break;
+        sub = s_sub_ppg;   vh = s_vh_ppg;      break;
     case BLE_CH_ACCEL:
-        sub = s_sub_accel; vh = s_vh_accel;                 break;
-    case BLE_TX_CH_OTA_IND:
-        sub = s_sub_ota;   vh = s_vh_ota_ctrl; ind = true;  break;
+        sub = s_sub_accel; vh = s_vh_accel;    break;
+    case BLE_TX_CH_OTA_RESP:
+        sub = s_sub_ota;   vh = s_vh_ota_ctrl; break;
     default:
         return false;
     }
@@ -1137,22 +1140,12 @@ bool ble_gatt_tx_chan_ready(int tx_ch, uint16_t *conn, uint16_t *val_handle,
     if (!s_sec_open && !s_encrypted) {
         return false;
     }
-    if (ind && s_ind_inflight) {
-        if (esp_timer_get_time() - s_ind_since_us < IND_STALE_US) {
-            return false;          /* one outstanding indication max */
-        }
-        ESP_LOGW(TAG, "indication ack overdue — releasing gate");
-        s_ind_inflight = false;
-    }
 
     if (conn != NULL) {
         *conn = c;
     }
     if (val_handle != NULL) {
         *val_handle = vh;
-    }
-    if (is_indication != NULL) {
-        *is_indication = ind;
     }
     return true;
 }
@@ -1204,14 +1197,3 @@ bool ble_gatt_hrs_notify_ready(uint16_t *conn, uint16_t *val_handle)
     return true;
 }
 
-/* Private handshake with ble_tx.c (declared locally there): brackets
- * the one-outstanding-indication window. Set BEFORE the indicate call
- * (the ack can race the call's return), cleared on failure by ble_tx
- * and on completion by the NOTIFY_TX handler above. */
-void ble_gatt_ind_inflight_set(bool inflight)
-{
-    if (inflight) {
-        s_ind_since_us = esp_timer_get_time();
-    }
-    s_ind_inflight = inflight;
-}

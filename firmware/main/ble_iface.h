@@ -9,9 +9,11 @@
 
 /* Drain priority order (ble_tx services lower enum values first):
  * control responses and events are small and semantically critical;
- * raw streams are seq-numbered so loss is recoverable. */
+ * raw streams are seq-numbered so loss is recoverable. All channels
+ * are notifications — indications are unusable in this peripheral-only
+ * build (BLE_GATTC=0: acks compiled out, procs leak; see ble_gatt.c). */
 typedef enum {
-    BLE_CH_CTRL_IND = 0,   /* CONTROL response (indication)  */
+    BLE_CH_CTRL_RESP = 0,  /* CONTROL response (notification) */
     BLE_CH_EVENT,
     BLE_CH_IBI,
     BLE_CH_STATUS,
@@ -58,17 +60,16 @@ void ble_request_conn_speed(bool fast);
 /* Appended: PRIVATE surface between ble_gatt.c and ble_tx.c. Nothing  */
 /* outside those two files may call these.                             */
 /* ------------------------------------------------------------------ */
-/* Extra ble_tx staging channel for OTA_CTRL indications (not part of
- * the public producer enum; drained right after BLE_CH_CTRL_IND). */
-#define BLE_TX_CH_OTA_IND ((int)BLE_CH_COUNT)
-#define BLE_TX_CH_TOTAL   ((int)BLE_CH_COUNT + 1)
+/* Extra ble_tx staging channel for OTA_CTRL responses (not part of
+ * the public producer enum; drained right after BLE_CH_CTRL_RESP). */
+#define BLE_TX_CH_OTA_RESP ((int)BLE_CH_COUNT)
+#define BLE_TX_CH_TOTAL    ((int)BLE_CH_COUNT + 1)
 
 /* True iff a central is connected, the channel's CCCD is enabled and —
  * for these all-custom channels — the encrypted-link gate passes.
- * Out-params (any may be NULL): conn handle, char value handle, and
- * whether the channel uses indications instead of notifications. */
+ * Out-params (any may be NULL): conn handle, char value handle. */
 bool ble_gatt_tx_chan_ready(int tx_ch, uint16_t *conn,
-                            uint16_t *val_handle, bool *is_indication);
+                            uint16_t *val_handle);
 
 /* ble_tx pushes every STATUS submission here so STATUS reads return
  * the latest snapshot even between notifications. */

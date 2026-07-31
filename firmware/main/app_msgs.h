@@ -19,7 +19,7 @@ typedef enum {
     SYS_AGC_ACTIONS,     /* u.agc: decisions from dsp_task slow tick     */
     SYS_SUB_CHANGE,      /* u.subs: CCCD snapshot from ble_gatt          */
     SYS_CTRL_REQ,        /* u.ctrl: copied CONTROL write (respond via
-                            BLE_CH_CTRL_IND after dispatch in sys ctx)   */
+                            BLE_CH_CTRL_RESP after dispatch in sys ctx)   */
     SYS_TICK_1HZ,        /* battery/charger/STATUS housekeeping          */
     SYS_WEAR_CHANGED,    /* u.flag: from dsp_task 1 Hz wear eval         */
     SYS_GATE_CHANGED,    /* u.gate: state+reason for EVENT emission      */
