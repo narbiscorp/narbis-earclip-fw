@@ -93,7 +93,7 @@ void app_main(void)
      * "distinct press" during the button-echo step easily exceeds it,
      * and the vendor instructions promise 5 s. Force 5 s every boot of
      * a TEST build (runtime value only; not persisted, knob editable). */
-    (void)nc_knob_set(KNOB_PRESS_LONG_MS, 5000);
+    nc_knob_val[KNOB_PRESS_LONG_MS] = 5000;
 #endif
     diag_init();
     ESP_ERROR_CHECK(power_init());
