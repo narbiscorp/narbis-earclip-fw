@@ -51,3 +51,13 @@ void test_ops_on_disconnect(void);
  * with test_led_ind.c so bench-state bookkeeping has one owner.
  */
 esp_err_t test_ops_ensure_bench_afe(void);
+
+/*
+ * sys_task context, from the SYS_BTN_EDGE handler: when the 0xE5
+ * button-echo is armed, emit the edge marker (id 1000+level) on
+ * EVENT_STREAM. Rides the debounced ISR->FSM path — the original
+ * 50 Hz GPIO-poll echo went silent after the first press on real
+ * hardware (power-managed idle) while the FSM path kept working.
+ * No-op stub in production builds.
+ */
+void test_ops_btn_edge(bool pressed, uint32_t t_ms);

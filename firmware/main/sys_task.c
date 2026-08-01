@@ -1079,6 +1079,9 @@ void sys_task_run(void *arg)
         }
         switch (m.type) {
         case SYS_BTN_EDGE:
+            /* TEST builds: mirror the debounced edge to EVENT_STREAM
+             * when the 0xE5 echo is armed (no-op stub in production). */
+            test_ops_btn_edge(m.u.btn.pressed, m.u.btn.t_ms);
             btn_run(m.u.btn.pressed ? NC_BTN_EV_DOWN : NC_BTN_EV_UP,
                     m.u.btn.t_ms);
             break;

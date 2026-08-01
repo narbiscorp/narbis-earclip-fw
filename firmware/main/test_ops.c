@@ -36,6 +36,11 @@ void test_ops_on_disconnect(void)
 {
 }
 
+void test_ops_btn_edge(bool pressed, uint32_t t_ms)
+{
+    (void)pressed; (void)t_ms;
+}
+
 #else /* NARBIS_TEST_MODE */
 
 #include <string.h>
@@ -128,7 +133,6 @@ esp_err_t test_ops_ensure_bench_afe(void)
 /* Timers (created lazily; all cbs run in the esp_timer task)          */
 /* ------------------------------------------------------------------ */
 static esp_timer_handle_t s_led_off_tmr;
-static esp_timer_handle_t s_btn_poll_tmr;
 static esp_timer_handle_t s_sleep_tmr;
 
 static void led_off_cb(void *arg)
@@ -143,28 +147,6 @@ static void led_off_cb(void *arg)
         ESP_LOGW(TAG, "sys_q full — LED off written directly");
         afe4404_set_led_ma(0, 0);
     }
-}
-
-/* Button echo: 50 Hz GPIO poll, edges emitted as MARKER events with
- * marker_id = 1000 + level (press=1000: active-low button reads 0).
- * Rides the normal EVENT_STREAM drain in sys_task. */
-static int s_btn_last = -1;
-
-static void btn_poll_cb(void *arg)
-{
-    (void)arg;
-    int lvl = gpio_get_level(PIN_BUTTON);
-    if (lvl != s_btn_last && s_btn_last >= 0 && event_q != NULL) {
-        uint16_t id = (uint16_t)(1000 + lvl);
-        nc_event_t ev = {
-            .t_us = (uint64_t)esp_timer_get_time(),
-            .type = NC_EV_MARKER,
-            .len = 3,
-            .data = { NC_MARKER_SRC_BUTTON, (uint8_t)id, (uint8_t)(id >> 8) },
-        };
-        xQueueSend(event_q, &ev, 0);
-    }
-    s_btn_last = lvl;
 }
 
 static void sleep_now_cb(void *arg)
@@ -493,24 +475,37 @@ static nc_ctrl_status_t op_rate_count(const uint8_t *pl, size_t len,
     return NC_ST_OK;
 }
 
-/* 0xE5 — button echo on/off. */
+/* 0xE5 — button echo on/off. Armed = the debounced FSM edges are
+ * mirrored to EVENT_STREAM by test_ops_btn_edge() (sys_task's
+ * SYS_BTN_EDGE handler). The first design polled the raw GPIO at 50 Hz
+ * from an esp_timer; on real hardware the poll went silent after the
+ * first press (power-managed idle) while the ISR->debounce->FSM path
+ * kept delivering — so the echo now rides that proven path. */
+static bool s_btn_echo_on;
+
 static nc_ctrl_status_t op_button_echo(const uint8_t *pl, size_t len)
 {
     if (len != 1) {
         return NC_ST_BAD_LEN;
     }
-    if (tmr_lazy(&s_btn_poll_tmr, btn_poll_cb, "to_btn") != ESP_OK) {
-        return NC_ST_BUSY;
-    }
-    if (pl[0]) {
-        s_btn_last = -1;              /* first poll seeds, no phantom edge */
-        if (!esp_timer_is_active(s_btn_poll_tmr)) {
-            esp_timer_start_periodic(s_btn_poll_tmr, 20 * 1000); /* 50 Hz */
-        }
-    } else {
-        esp_timer_stop(s_btn_poll_tmr);
-    }
+    s_btn_echo_on = (pl[0] != 0);
     return NC_ST_OK;
+}
+
+void test_ops_btn_edge(bool pressed, uint32_t t_ms)
+{
+    (void)t_ms;
+    if (!s_btn_echo_on || event_q == NULL) {
+        return;
+    }
+    uint16_t id = (uint16_t)(1000 + (pressed ? 0 : 1)); /* level after edge */
+    nc_event_t ev = {
+        .t_us = (uint64_t)esp_timer_get_time(),
+        .type = NC_EV_MARKER,
+        .len = 3,
+        .data = { NC_MARKER_SRC_BUTTON, (uint8_t)id, (uint8_t)(id >> 8) },
+    };
+    (void)xQueueSend(event_q, &ev, 0);
 }
 
 /* 0xE6 — charger snapshot. Polled-response design (stateless): the
@@ -685,6 +680,7 @@ static nc_ctrl_status_t op_led_sweep_cont(const uint8_t *pl, size_t len)
 void test_ops_on_disconnect(void)
 {
     sweep_stop();
+    s_btn_echo_on = false;   /* session-scoped, like the sweep */
 }
 
 /* ------------------------------------------------------------------ */

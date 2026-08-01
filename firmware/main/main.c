@@ -87,6 +87,14 @@ void app_main(void)
 
     nc_knobs_init();          /* defaults ... */
     knobs_nvs_load();         /* ... overlaid with persisted deltas */
+#if NARBIS_TEST_MODE
+    /* Bench guard (first hardware, 2026-07-31): the production 1.5 s
+     * hold-to-off kills the board mid-test — an operator's deliberate
+     * "distinct press" during the button-echo step easily exceeds it,
+     * and the vendor instructions promise 5 s. Force 5 s every boot of
+     * a TEST build (runtime value only; not persisted, knob editable). */
+    (void)nc_knob_set(KNOB_PRESS_LONG_MS, 5000);
+#endif
     diag_init();
     ESP_ERROR_CHECK(power_init());
 

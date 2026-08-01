@@ -538,3 +538,27 @@ footer#reportPane { margin: 0 14px 14px; }
 }
 #infoPop.hidden { display: none; }
 @media print { .info-dot, #infoPop { display: none !important; } }
+
+/* step-detail panel (click a finished checklist row) */
+#stepDetail {
+  margin-top: 8px;
+  border: 1px solid var(--accent, #3b82f6);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--pane);
+  font-size: 13px;
+}
+#stepDetail.hidden { display: none; }
+.sd-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.sd-close {
+  margin-left: auto;
+  background: none; border: none;
+  color: var(--text, inherit);
+  font-size: 16px; cursor: pointer; padding: 0 4px;
+}
+.sd-tbl { border-collapse: collapse; width: 100%; }
+.sd-tbl td { padding: 2px 8px 2px 0; vertical-align: top; }
+.sd-tbl td:first-child { color: #7f8ea3; white-space: nowrap; width: 1%; }
+.sd-tbl td.pass { color: #3fbf6f; }
+.sd-tbl td.fail { color: #e34d6a; }
+.sd-actions { margin-top: 8px; }

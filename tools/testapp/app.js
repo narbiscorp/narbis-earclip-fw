@@ -134,11 +134,28 @@ const NarbisAnalysis = {
     let dom = 0;
     for (let i = 1; i < 3; i++) if (Math.abs(v[i]) > Math.abs(v[dom])) dom = i;
     const a = Math.abs(v[dom]);
-    if (a < 0.7 || a > 1.35) return null;
+    /* Hand-held: 0.6 g dominant / 0.45 g cross-axis ≈ 30° of tilt
+     * allowance (first bench: -Y at full articulation missed 0.7/0.35). */
+    if (a < 0.6 || a > 1.45) return null;
     for (let i = 0; i < 3; i++) {
-      if (i !== dom && Math.abs(v[i]) > 0.35) return null;
+      if (i !== dom && Math.abs(v[i]) > 0.45) return null;
     }
     return names[dom][v[dom] > 0 ? 0 : 1];
+  },
+
+  /* Closest face + what blocks its capture — live coaching text. */
+  faceHint(gx, gy, gz) {
+    const v = [gx, gy, gz];
+    const names = [["+X", "-X"], ["+Y", "-Y"], ["+Z", "-Z"]];
+    let dom = 0;
+    for (let i = 1; i < 3; i++) if (Math.abs(v[i]) > Math.abs(v[dom])) dom = i;
+    const cand = names[dom][v[dom] > 0 ? 0 : 1];
+    const a = Math.abs(v[dom]);
+    if (a < 0.3) return "rotating…";
+    const cross = Math.max(...v.map((x, i) => (i === dom ? 0 : Math.abs(x))));
+    if (a < 0.6) return `near ${cand} — keep rotating toward flat`;
+    if (cross > 0.45) return `near ${cand} — level out (tilt ${cross.toFixed(2)} g)`;
+    return `${cand} — hold still`;
   },
 
   /* Battery calibration vs bench meter: DoD is ±50 mV. */
@@ -913,6 +930,9 @@ if (typeof document !== "undefined") (() => {
         timers.clear();
         S.sinks.event = S.sinks.ppg = S.sinks.accel = null;
         clearControls();
+        /* Steps that drew on the shared canvas (accel bars, sweep
+         * plots) must not leak their last frame into the next step. */
+        canvasCtx();
       },
     };
     return ctx;
@@ -987,28 +1007,36 @@ if (typeof document !== "undefined") (() => {
          * connected, so a bare "it lights" prompt proves nothing. Drive
          * a pattern the indicator never makes: dark 1 s -> red-only
          * 3 s -> dark, and ask about THAT. */
-        ctx.instruct("Watch the emitter board. The LED will go " +
-          "<strong>dark for 1 s</strong>, then the <strong>red LED alone</strong> " +
-          "lights at 40 mA for 3 s, then dark again. The glow is dim by " +
-          "design (~1% optical duty) — <strong>shade the emitter</strong> " +
-          "from bench light or cup a hand around it.");
-        await ctx.buttons([{ label: "Fire red LED", value: "go", kind: "primary" }]);
+        ctx.instruct("The red LED will <strong>strobe: 6 blinks</strong> at " +
+          "40 mA, ~1 s apart. At 1% optical duty the glow is faint — a " +
+          "blinking dot is far easier to catch than a steady one. " +
+          "<strong>Dim the bench light or cup a hand</strong> around the " +
+          "emitter, or watch through your <strong>phone camera</strong> " +
+          "(cameras also reveal the IR die as a purple dot in step 7).");
+        await ctx.buttons([{ label: "Start strobe", value: "go", kind: "primary" }]);
         await ctx.race(ctrl("testLedDrive", [1, 0, 0]));   /* LEDs dark */
         ctx.readout('<span class="big">dark…</span>');
-        await ctx.sleep(1000 * ctx.ts);
-        await ctx.race(ctrl("testLedDrive", [1, 40, 3000]));
-        ctx.readout('<span class="big" style="color:#e34d6a">● RED ON</span> 40 mA, 3 s');
-        await ctx.sleep(3000 * ctx.ts);
-        ctx.readout("dark again — did you see the off / RED / off pattern?");
+        await ctx.sleep(800 * ctx.ts);
+        for (let i = 0; i < 6; i++) {
+          await ctx.race(ctrl("testLedDrive", [1, 40, 400]));
+          ctx.readout(`<span class="big" style="color:#e34d6a">● RED</span> blink ${i + 1}/6`);
+          await ctx.sleep(400 * ctx.ts);
+          ctx.readout(`<span class="big">dark</span> blink ${i + 1}/6`);
+          await ctx.sleep(600 * ctx.ts);
+        }
+        ctx.readout("done — did you see 6 red blinks?");
         const ans = await ctx.buttons([
-          { label: "Yes — off, red glow, off", value: "yes", kind: "good" },
-          { label: "No glow", value: "no", kind: "bad" },
+          { label: "Yes — 6 red blinks", value: "yes", kind: "good" },
+          { label: "No glow at all", value: "no", kind: "bad" },
         ]);
         return {
           result: ans === "yes" ? "pass" : "fail",
-          value: ans === "yes" ? "glow pattern confirmed" : "no glow",
-          expected: "dark → red glow (3 s) → dark",
-          note: ans === "yes" ? "" : "check TX2 net / FFC / emitter board",
+          value: ans === "yes" ? "strobe pattern confirmed" : "no glow",
+          expected: "6 red blinks at 40 mA",
+          note: ans === "yes" ? "" :
+            "if the LED sweep (step 7, fingertip in clip) shows a healthy " +
+            "RED span, the die emits and this is a visibility issue — " +
+            "retry in darkness / with a phone camera before reworking TX2/FFC",
         };
       },
     },
@@ -1016,9 +1044,12 @@ if (typeof document !== "undefined") (() => {
     {
       id: "led_sweep", name: "7. LED I-V sweeps (IR + red)", mode: "auto",
       async run(ctx) {
-        ctx.instruct("Sweeping LED current 0→max in 2 mA steps, both LEDs, " +
-          "reading DC photocurrent per step. Keep the clip still. Each " +
-          "sweep blocks the device for a few seconds — the status " +
+        ctx.instruct("<strong>Close the clip on a fingertip</strong> (or a " +
+          "white scatter target) and keep it still — the emitter and " +
+          "photodiode face each other, so an open clip has almost no " +
+          "optical path and the sweep reads flat no matter how healthy " +
+          "the LEDs are. Sweeping LED current 0→max in 2 mA steps, both " +
+          "LEDs. Each sweep blocks the device ~12 s — the status " +
           "heartbeat pauses; that is normal.");
         /* The firmware's report blob holds only the LAST sweep (test_ops.c
          * blob ver 2) — run 0xE2, fetch 0xEA, then repeat for the other LED. */
@@ -1060,10 +1091,12 @@ if (typeof document !== "undefined") (() => {
     {
       id: "rx_sweep", name: "8. RX chain sweep (TIA gain + offset DAC)", mode: "auto",
       async run(ctx) {
-        ctx.instruct("Sweeping TIA gain codes 0..7 and the offset DAC at a " +
-          "fixed 20 mA IR drive, reading DC per setting. Verifies INP/INM " +
-          "wiring and DAC function. RF codes are not in ohm order — the " +
-          "verdict re-orders by actual RF (500k…10k, 1M, 2M).");
+        ctx.instruct("<strong>Keep the fingertip in the closed clip</strong> " +
+          "(same coupling as the LED sweep — without it the RX sweep " +
+          "reads ambient only and fails flat). Sweeping TIA gain codes " +
+          "0..7 and the offset DAC at a fixed 20 mA IR drive. Verifies " +
+          "INP/INM wiring and DAC function. RF codes are not in ohm " +
+          "order — the verdict re-orders by actual RF (500k…10k, 1M, 2M).");
         /* fetch after EACH sweep — the blob holds only the last one */
         ctx.readout("sweeping TIA gain… (device blocks ~4 s)");
         await ctx.race(ctrl("testRxSweep", [0], { timeoutMs: 20000 * ctx.ts + 8000 }));
@@ -1152,7 +1185,8 @@ if (typeof document !== "undefined") (() => {
           const face = A.faceOf(gv[0], gv[1], gv[2]);
           if (face) captured.add(face);
           drawAccelBars(gv, captured,
-            `captured ${captured.size}/6   FIFO overruns: ${overruns}`);
+            `captured ${captured.size}/6   ${A.faceHint(gv[0], gv[1], gv[2])}` +
+            `   FIFO overruns: ${overruns}`);
           if (captured.size === 6) doneRes();
         });
         const timeout = new Promise((_, rej) =>
@@ -1177,9 +1211,11 @@ if (typeof document !== "undefined") (() => {
     {
       id: "button", name: "11. Button echo (5 presses)", mode: "manual",
       async run(ctx) {
-        ctx.instruct("<strong>Press the button 5 times</strong> (normal, " +
-          "distinct presses). Edges stream back with µs timestamps — " +
-          "verifies SW3, the TVS/C22 net and debounce behavior.");
+        ctx.instruct("<strong>Press the button 5 times</strong> — quick, " +
+          "clean presses, <strong>under a second each</strong> (a long " +
+          "hold is the power-off gesture: 5 s in this build). Debounced " +
+          "edges stream back with µs timestamps — verifies SW3 and the " +
+          "TVS/C22 net.");
         await ctx.race(ctrl("testButtonEcho", [1]));
         const edges = [];
         let doneRes;
@@ -1433,23 +1469,58 @@ if (typeof document !== "undefined") (() => {
         `<span class="st-name">${step.name}` +
         `<span class="mode">${step.mode}</span></span>` +
         `<span class="st-val ${st}">${r && r.value ? r.value : ""}</span>`;
-      /* after a run: click a completed step to re-run just that one
-       * (troubleshooting flow — a rerun replaces the step's report row) */
-      if (r && !S.seqRunning && !S.currentStep) {
+      /* any finished step: click to review its stored result (safe at
+       * any time, incl. mid-sequence) with an explicit Re-run button
+       * when idle — the old click-to-instantly-rerun was undiscoverable
+       * and one stray click on "sleep" powered the board off */
+      if (r) {
         li.classList.add("rerunnable");
-        li.title = "click to re-run this step";
-        li.onclick = () => {
-          if (S.seqRunning || S.currentStep || S.flashing) return;
-          if (!(S.server && S.server.connected)) {
-            banner("Reconnect first to re-run a step.", "error");
-            return;
-          }
-          log(`re-running step: ${step.name}`);
-          runStep(step, i);
-        };
+        li.title = "click to view result / re-run";
+        li.onclick = () => showStepDetail(step, i);
       }
       ol.appendChild(li);
     });
+  }
+
+  function showStepDetail(step, i) {
+    const r = S.results[i];
+    if (!r) return;
+    const esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;");
+    const box = $("stepDetail");
+    box.classList.remove("hidden");
+    box.innerHTML =
+      `<div class="sd-head"><span class="st-ico ${r.result}">${
+        r.result === "pass" ? "✓" : r.result === "fail" ? "✕" :
+        r.result === "info" ? "ⓘ" : "»"}</span> <strong>${esc(step.name)}</strong>` +
+      `<button class="sd-close" title="close">×</button></div>` +
+      `<table class="sd-tbl">` +
+      `<tr><td>result</td><td class="${r.result}">${esc(r.result)}</td></tr>` +
+      `<tr><td>value</td><td>${esc(r.value) || "—"}</td></tr>` +
+      `<tr><td>expected</td><td>${esc(r.expected) || "—"}</td></tr>` +
+      `<tr><td>note</td><td>${esc(r.note) || "—"}</td></tr>` +
+      `<tr><td>duration</td><td>${((r.durationMs || 0) / 1000).toFixed(1)} s</td></tr>` +
+      `</table><div class="sd-actions"></div>`;
+    box.querySelector(".sd-close").onclick = () => box.classList.add("hidden");
+    const actions = box.querySelector(".sd-actions");
+    const busy = S.seqRunning || S.currentStep || S.flashing;
+    const connected = S.server && S.server.connected;
+    const b = document.createElement("button");
+    b.textContent = "Re-run this step";
+    b.className = "primary";
+    if (busy) {
+      b.disabled = true;
+      b.title = "finish the running sequence first";
+    } else if (!connected) {
+      b.disabled = true;
+      b.title = "reconnect first";
+    } else {
+      b.onclick = () => {
+        box.classList.add("hidden");
+        log(`re-running step: ${step.name}`);
+        runStep(step, i);
+      };
+    }
+    actions.appendChild(b);
   }
 
   async function runStep(step, index) {
