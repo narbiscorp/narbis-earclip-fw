@@ -27,6 +27,8 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 
+#include "driver/gpio.h"
+
 #include "acq.h"
 #include "afe4404.h"
 #include "app_msgs.h"
@@ -38,6 +40,15 @@ static const char *TAG = "led_ind";
 #define IND_IR_MA      25          /* 50 % of LED_IR_MAX_MA (50)  */
 #define IND_RED_MA     20          /* 50 % of LED_RED_MAX_MA (40) */
 #define IND_PERIOD_US  (500LL * 1000)
+
+/* XIAO module onboard user LED (GPIO15, module-internal pin, active
+ * LOW). Unlike the optical AFE indicator this one is never handed
+ * over — it always shows power/link state on the bench: 1 Hz blink =
+ * on + advertising, steady = connected. Invisible in the closed
+ * enclosure, so there is no production cost to driving it. */
+#define ONBOARD_LED_GPIO   15
+#define ONBOARD_ON         0       /* active low */
+#define ONBOARD_OFF        1
 
 typedef enum { IND_OFF = 0, IND_OWNING, IND_RELEASED } ind_state_t;
 
@@ -58,6 +69,13 @@ void test_led_ind_start(void)
 {
     if (s_ind != IND_OFF) {
         return;
+    }
+    const gpio_config_t io = {
+        .pin_bit_mask = 1ULL << ONBOARD_LED_GPIO,
+        .mode = GPIO_MODE_OUTPUT,
+    };
+    if (gpio_config(&io) == ESP_OK) {
+        gpio_set_level(ONBOARD_LED_GPIO, ONBOARD_OFF);
     }
     const esp_timer_create_args_t a = { .callback = ind_tick_cb,
                                         .name = "to_ind" };
@@ -87,7 +105,15 @@ void test_led_ind_poll(void)
     }
     const bool conn = ble_is_connected();
 
-    /* (a) acquisition running: the AGC owns the LEDs. */
+    /* Onboard module LED first — never handed over, tracks link state
+     * through every ownership transition below: steady = connected,
+     * 1 Hz pulse = powered + advertising. */
+    static bool s_ob_phase;
+    s_ob_phase = !s_ob_phase;
+    gpio_set_level(ONBOARD_LED_GPIO,
+                   (conn || s_ob_phase) ? ONBOARD_ON : ONBOARD_OFF);
+
+    /* (a) acquisition running: the AGC owns the optical LEDs. */
     if (acq_ppg_running()) {
         if (s_ind == IND_OWNING) {
             s_ind = IND_RELEASED;

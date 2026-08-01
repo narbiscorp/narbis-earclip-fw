@@ -52,27 +52,40 @@ const NarbisAnalysis = {
     return { ver, kind, param, points };
   },
 
-  /* Sweep sanity: a healthy LED/RX sweep rises monotonically and is not
-   * flat. Flat response = open emitter / disconnected FFC / dead RX. */
-  sweepVerdict(ys, opts) {
-    const o = Object.assign({ minSpan: 2000, minRisingFrac: 0.8 }, opts);
+  /* Sweep sanity: a healthy LED/RX sweep RISES with the setting and is
+   * not flat. Flat response = open emitter / disconnected FFC / dead RX.
+   * Verdict = Pearson correlation of dc vs sample index, NOT per-step
+   * monotonicity: on first hardware, mains-flicker residue (ambient
+   * phase and LED phase sample the room light at different instants,
+   * so subtraction can't cancel the 100/120 Hz beat) is comparable to
+   * one 2 mA step, and step-wise checks failed sweeps whose overall
+   * rise was unmistakable. Correlation sees through per-point noise
+   * but still fails flat, dead, and saturated-flat responses. */
+  sweepVerdict(ys, opts, xs) {
+    const o = Object.assign({ minSpan: 2000, minCorr: 0.92 }, opts);
     if (!ys || ys.length < 4) {
-      return { pass: false, flat: true, span: 0, risingFrac: 0, note: "too few points" };
+      return { pass: false, flat: true, span: 0, corr: 0, note: "too few points" };
     }
+    const n = ys.length;
+    const x = xs && xs.length === n ? xs : ys.map((_, i) => i);
     const min = Math.min(...ys), max = Math.max(...ys);
     const span = max - min;
-    const eps = span * 0.02 + 50; /* tolerate LSB noise on the plateau */
-    let rising = 0;
-    for (let i = 1; i < ys.length; i++) {
-      if (ys[i] >= ys[i - 1] - eps) rising++;
+    const mx = x.reduce((a, b) => a + b, 0) / n;
+    const my = ys.reduce((a, b) => a + b, 0) / n;
+    let sxy = 0, sxx = 0, syy = 0;
+    for (let i = 0; i < n; i++) {
+      sxy += (x[i] - mx) * (ys[i] - my);
+      sxx += (x[i] - mx) * (x[i] - mx);
+      syy += (ys[i] - my) * (ys[i] - my);
     }
-    const risingFrac = rising / (ys.length - 1);
+    const corr = (syy > 0 && sxx > 0) ? sxy / Math.sqrt(sxx * syy) : 0;
     const flat = span < o.minSpan;
-    const pass = !flat && risingFrac >= o.minRisingFrac;
+    const pass = !flat && corr >= o.minCorr;
     return {
-      pass, flat, span, risingFrac,
+      pass, flat, span, corr,
       note: flat ? "FLAT response — open emitter / FFC / RX path"
-        : (pass ? "monotonic rise" : "non-monotonic response"),
+        : (pass ? `rises with setting (r=${corr.toFixed(3)})`
+                : `does not track setting (r=${corr.toFixed(3)})`),
     };
   },
 
@@ -82,7 +95,11 @@ const NarbisAnalysis = {
   gainSweepVerdict(codes, dcs, opts) {
     const pts = codes.map((c, i) => ({ ohms: this.RF_OHMS[c & 7], dc: dcs[i] }))
       .sort((a, b) => a.ohms - b.ohms);
-    const v = this.sweepVerdict(pts.map((p) => p.dc), opts);
+    /* Correlate dc against the RF value itself: transimpedance is
+     * dc ∝ ohms, and the ohm ladder (10k…2M) is far from uniform —
+     * correlating vs rank would punish the physics. */
+    const v = this.sweepVerdict(pts.map((p) => p.dc), opts,
+                                pts.map((p) => p.ohms));
     v.note = v.flat ? "FLAT vs RF — dead RX path / INP-INM wiring"
       : (v.pass ? "dc tracks RF (ohm-ordered)" : "dc does not track RF");
     return v;
@@ -925,7 +942,7 @@ if (typeof document !== "undefined") (() => {
         }
         ctx.readout("running…");
         const resp = await ctx.race(ctrl("testSelftestOne", [testId],
-                                         { timeoutMs: 15000 }));
+                                         { timeoutMs: 30000 }));
         const rec = NP.parseSelftestRecord(resp.payload);
         const result = opts.frameThr !== undefined
           ? A.opticalResult(rec, P, opts.frameThr)
@@ -972,13 +989,15 @@ if (typeof document !== "undefined") (() => {
          * 3 s -> dark, and ask about THAT. */
         ctx.instruct("Watch the emitter board. The LED will go " +
           "<strong>dark for 1 s</strong>, then the <strong>red LED alone</strong> " +
-          "lights at 20 mA for 3 s, then dark again.");
+          "lights at 40 mA for 3 s, then dark again. The glow is dim by " +
+          "design (~1% optical duty) — <strong>shade the emitter</strong> " +
+          "from bench light or cup a hand around it.");
         await ctx.buttons([{ label: "Fire red LED", value: "go", kind: "primary" }]);
         await ctx.race(ctrl("testLedDrive", [1, 0, 0]));   /* LEDs dark */
         ctx.readout('<span class="big">dark…</span>');
         await ctx.sleep(1000 * ctx.ts);
-        await ctx.race(ctrl("testLedDrive", [1, 20, 3000]));
-        ctx.readout('<span class="big" style="color:#e34d6a">● RED ON</span> 20 mA, 3 s');
+        await ctx.race(ctrl("testLedDrive", [1, 40, 3000]));
+        ctx.readout('<span class="big" style="color:#e34d6a">● RED ON</span> 40 mA, 3 s');
         await ctx.sleep(3000 * ctx.ts);
         ctx.readout("dark again — did you see the off / RED / off pattern?");
         const ans = await ctx.buttons([
@@ -1004,7 +1023,7 @@ if (typeof document !== "undefined") (() => {
         /* The firmware's report blob holds only the LAST sweep (test_ops.c
          * blob ver 2) — run 0xE2, fetch 0xEA, then repeat for the other LED. */
         const sweep1 = async (led, label) => {
-          ctx.readout(`sweeping ${label}… (device blocks ~6 s)`);
+          ctx.readout(`sweeping ${label}… (device blocks ~12 s)`);
           await ctx.race(ctrl("testLedSweep", [led, 2],
                               { timeoutMs: 30000 * ctx.ts + 8000 }));
           const rep = await ctx.race(fetchSweep());
@@ -1024,7 +1043,7 @@ if (typeof document !== "undefined") (() => {
           { x: ir.ma, y: ir.dc, color: COLORS.ir, label: "IR dc-amb vs mA" },
           { x: red.ma, y: red.dc, color: COLORS.red, label: "RED dc-amb vs mA" },
         ], { xlabel: "LED mA", y0: true });
-        const vIr = A.sweepVerdict(ir.dc), vRed = A.sweepVerdict(red.dc);
+        const vIr = A.sweepVerdict(ir.dc, {}, ir.ma), vRed = A.sweepVerdict(red.dc, {}, red.ma);
         const pass = vIr.pass && vRed.pass;
         ctx.readout(`IR: ${vIr.note} (span ${vIr.span.toLocaleString()})\n` +
                     `RED: ${vRed.note} (span ${vRed.span.toLocaleString()})`);
@@ -1046,7 +1065,7 @@ if (typeof document !== "undefined") (() => {
           "wiring and DAC function. RF codes are not in ohm order — the " +
           "verdict re-orders by actual RF (500k…10k, 1M, 2M).");
         /* fetch after EACH sweep — the blob holds only the last one */
-        ctx.readout("sweeping TIA gain… (device blocks ~2 s)");
+        ctx.readout("sweeping TIA gain… (device blocks ~4 s)");
         await ctx.race(ctrl("testRxSweep", [0], { timeoutMs: 20000 * ctx.ts + 8000 }));
         const repGain = await ctx.race(fetchSweep());
         if (repGain.kind !== 2 || repGain.param !== 0) {
@@ -1057,7 +1076,7 @@ if (typeof document !== "undefined") (() => {
           code: repGain.points.map((p) => p.setting),
           dc: repGain.points.map((p) => p.ir - p.amb),
         };
-        ctx.readout("sweeping offset DAC… (device blocks ~7 s)");
+        ctx.readout("sweeping offset DAC… (device blocks ~12 s)");
         await ctx.race(ctrl("testRxSweep", [1], { timeoutMs: 20000 * ctx.ts + 8000 }));
         const repDac = await ctx.race(fetchSweep());
         const series = [{ x: gain.code, y: gain.dc, color: COLORS.accent,
@@ -1068,12 +1087,12 @@ if (typeof document !== "undefined") (() => {
                         color: COLORS.ir, label: "IR dc vs offset-DAC code" });
         }
         ctx.drawPlot(series, { xlabel: "code", y0: true });
-        const v = A.gainSweepVerdict(gain.code, gain.dc, { minRisingFrac: 0.85 });
+        const v = A.gainSweepVerdict(gain.code, gain.dc, { minCorr: 0.9 });
         ctx.readout(`TIA gain sweep: ${v.note} ` +
-                    `(rising ${(v.risingFrac * 100).toFixed(0)}% ohm-ordered)`);
+                    `(r=${v.corr.toFixed(3)} ohm-ordered)`);
         return {
           result: v.pass ? "pass" : "fail",
-          value: `span ${v.span}, rising ${(v.risingFrac * 100).toFixed(0)}%`,
+          value: `span ${v.span}, r ${v.corr.toFixed(3)}`,
           expected: "dc tracks RF (ohm-ordered)",
           note: v.pass ? "" : v.note,
         };
@@ -1254,11 +1273,21 @@ if (typeof document !== "undefined") (() => {
           polling = false;
           await pollLoop.catch(() => {});
         }
-        const sawChg = seen.includes(P.CHG_CHARGING);
-        const sawBat = seen[0] === P.CHG_ON_BATTERY;
-        const returned = seen.lastIndexOf(P.CHG_ON_BATTERY) >
-                         seen.indexOf(P.CHG_CHARGING);
-        const pass = sawBat && sawChg && returned;
+        /* Order-agnostic verdict: the operator may start plugged OR on
+         * battery (first hardware run started USB-in and failed the
+         * old must-start-on-battery rule). What the step actually
+         * proves is that BOTH directions of the VUSB/charger seam work:
+         * at least one battery→charging edge and one charging→battery
+         * edge, in any order. STAT raw per state is recorded as data —
+         * polarity is only fully provable in the charging-vs-complete
+         * contrast, which needs a full charge (bring-up checklist). */
+        let plugEdges = 0, unplugEdges = 0;
+        for (let i = 1; i < seen.length; i++) {
+          const a = seen[i - 1], b = seen[i];
+          if (a === P.CHG_ON_BATTERY && b !== P.CHG_ON_BATTERY) plugEdges++;
+          if (a !== P.CHG_ON_BATTERY && b === P.CHG_ON_BATTERY) unplugEdges++;
+        }
+        const pass = plugEdges >= 1 && unplugEdges >= 1;
         const polarity = (P.CHG_CHARGING in statByState &&
                           P.CHG_ON_BATTERY in statByState)
           ? `STAT=${statByState[P.CHG_CHARGING]} charging / ` +
@@ -1267,7 +1296,7 @@ if (typeof document !== "undefined") (() => {
         return {
           result: pass ? "pass" : "fail",
           value: seen.map((s) => stateName[s] || s).join("→") || "no snapshots",
-          expected: "ON_BATTERY→CHARGING→ON_BATTERY",
+          expected: "a plug edge AND an unplug edge (any order)",
           note: `${polarity}${finish === "manual" ? " (operator-ended)" : ""}` +
                 " — record in bring-up checklist (STAT VERIFY-ON-BENCH)",
         };

@@ -362,7 +362,17 @@ if (typeof document !== "undefined" && document.getElementById("dashPane"))
     for (const el of guidedEls) el.classList.toggle("hidden", dash);
   }
   $("tabGuided").onclick = () => showTab(false);
-  $("tabDash").onclick = () => showTab(true);
+  $("tabDash").onclick = () => {
+    showTab(true);
+    /* Acquisition is subscription-gated and the manual controls need a
+     * running PPG engine (agcManual answers WRONG_STATE otherwise) —
+     * first hardware session read as "dashboard dead" because nothing
+     * started the streams. Auto-start on tab entry; the Stream button
+     * still toggles. */
+    if (!D.streaming && A.S.chars.control) {
+      $("btnStream").onclick();
+    }
+  };
 
   /* ---------------- dashboard state ---------------- */
   const D = {
@@ -720,8 +730,15 @@ if (typeof document !== "undefined" && document.getElementById("dashPane"))
   /* ---------------- controls ---------------- */
 
   function err(e) {
-    A.log(`dashboard: ${e.message || e}`);
-    A.banner(`Dashboard: ${e.message || e}`, "error");
+    let msg = e.message || String(e);
+    /* WRONG_STATE on the manual LED/TIA/rate controls means "the PPG
+     * engine is not running" (agcManual contract) — say that instead
+     * of leaking the raw status name at the operator. */
+    if (/WRONG_STATE/.test(msg)) {
+      msg += " — start streaming first (Stream on)";
+    }
+    A.log(`dashboard: ${msg}`);
+    A.banner(`Dashboard: ${msg}`, "error");
   }
 
   /* freeze AGC once before any manual LED/gain write (spec) */

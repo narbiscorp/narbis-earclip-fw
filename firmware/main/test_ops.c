@@ -269,7 +269,13 @@ static bool report_point(uint8_t setting)
     }
     int32_t ir, red, amb;
     vTaskDelay(pdMS_TO_TICKS(100));   /* analog settle after each step */
-    if (selftest_capture_mean(10, &ir, &red, &amb) != ESP_OK) {
+    /* 32 frames (320 ms @100 sps): first hardware showed mains-flicker
+     * residue ~ one 2 mA step with mean-of-10 — LED and ambient phases
+     * sample the room light at different instants, so the subtraction
+     * can't cancel the beat; only averaging over whole beat cycles
+     * does. 320 ms spans 6+ cycles of the 20 Hz (120 Hz vs 100 sps)
+     * beat. Sweep wall time ~11 s worst case; app timeout is 38 s. */
+    if (selftest_capture_mean(32, &ir, &red, &amb) != ESP_OK) {
         return false;
     }
     uint8_t *p = s_report + s_report_len;

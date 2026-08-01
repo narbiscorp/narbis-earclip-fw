@@ -453,8 +453,13 @@ const NarbisProto = (() => {
   function opName(op) { return P.OP_NAME[op] || `0x${op.toString(16)}`; }
   function statusName(st) { return P.CTRL_STATUS_NAME[st] || `status ${st}`; }
   function fsCountsPerG(fsCode) {
-    /* LIS2DH12 i16 left-justified: ±2g -> 16384 counts/g, halves per range */
-    return 16384 >> (fsCode & P.ACCF_FS_MASK);
+    /* Samples on the wire are RIGHT-justified 12-bit HR digits — the
+     * firmware's FIFO drain does the arithmetic >>4 (lis2dh12.c). So
+     * counts/g is the datasheet digits/g: ±2g 1 mg/digit -> 1000,
+     * ±4g -> 500, ±8g -> 250, ±16g 12 mg/digit -> 83.33. (The old
+     * left-justified 16384>>fs read exactly 16.4x small: 1 g showed
+     * as 0.06 g on first hardware, 2026-07-31.) */
+    return [1000, 500, 250, 1000 / 12][fsCode & P.ACCF_FS_MASK];
   }
 
   /* ---------------- OTA (firmware flashing over BLE) ------------------- */

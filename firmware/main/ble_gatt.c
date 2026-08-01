@@ -521,6 +521,13 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg);
 
 static void adv_start(bool fast)
 {
+#if NARBIS_TEST_MODE
+    /* Bench builds never drop to slow advertising: at 1-1.5 s intervals
+     * Chrome's chooser can take many seconds to list the device, which
+     * reads as "board randomly missing". The idle-power cost does not
+     * matter on the bench and this build never ships in an enclosure. */
+    fast = true;
+#endif
     if (!s_synced || s_shutdown || s_conn != BLE_HS_CONN_HANDLE_NONE) {
         return;
     }
