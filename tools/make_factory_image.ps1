@@ -2,8 +2,12 @@
 # NARBIS_TEST_MODE=1, merged single-file image (bootloader + partition
 # table + otadata + app) flashable at offset 0x0.
 #
-# Restores board.h to NARBIS_TEST_MODE 0 afterwards regardless of outcome.
+# -Bench additionally sets NARBIS_BENCH_BUILD=1 (bare-XIAO build: sensors
+# optional, onboard LED 2 Hz) -> vendor\narbis-earclip-bench.bin.
+#
+# Restores board.h afterwards regardless of outcome.
 # Output: vendor\narbis-earclip-functest.bin (+ a version .txt beside it).
+param([switch]$Bench)
 $repo = Split-Path $PSScriptRoot -Parent
 $board = Join-Path $repo 'firmware\main\board.h'
 $vendor = Join-Path $repo 'vendor'
@@ -33,9 +37,13 @@ if ($orig -notmatch '#define NARBIS_TEST_MODE 0') {
 $ver = git -C $repo describe --tags --always
 $dirty = git -C $repo status --porcelain -- ':!vendor'
 if ($dirty) { $ver = "$ver-dirty" }
+$outName = if ($Bench) { 'narbis-earclip-bench' } else { 'narbis-earclip-functest' }
 try {
-    Set-Content $board ($orig -replace '#define NARBIS_TEST_MODE 0',
-                                      '#define NARBIS_TEST_MODE 1') -NoNewline
+    $mod = $orig -replace '#define NARBIS_TEST_MODE 0', '#define NARBIS_TEST_MODE 1'
+    if ($Bench) {
+        $mod = $mod -replace '#define NARBIS_BENCH_BUILD 0', '#define NARBIS_BENCH_BUILD 1'
+    }
+    Set-Content $board $mod -NoNewline
     Set-Location (Join-Path $repo 'firmware')
     Invoke-Idf reconfigure   # re-runs git describe: PROJECT_VER is cached
                              # at configure time and would go stale
@@ -43,10 +51,11 @@ try {
     Invoke-Idf merge-bin
 
     New-Item -ItemType Directory -Force $vendor | Out-Null
-    Copy-Item (Join-Path $bdir 'merged-binary.bin') (Join-Path $vendor 'narbis-earclip-functest.bin') -Force
-    Set-Content (Join-Path $vendor 'narbis-earclip-functest.version.txt') `
-        "narbis-earclip-functest.bin  |  $ver  |  built $(Get-Date -Format s)  |  NARBIS_TEST_MODE=1"
-    Write-Host "OK -> vendor\narbis-earclip-functest.bin ($ver)"
+    Copy-Item (Join-Path $bdir 'merged-binary.bin') (Join-Path $vendor ($outName + '.bin')) -Force
+    $flags = if ($Bench) { 'NARBIS_TEST_MODE=1 BENCH=1' } else { 'NARBIS_TEST_MODE=1' }
+    Set-Content (Join-Path $vendor ($outName + '.version.txt')) `
+        "$($outName).bin  |  $ver  |  built $(Get-Date -Format s)  |  $flags"
+    Write-Host "OK -> vendor\$($outName).bin ($ver)"
 }
 finally {
     Set-Content $board $orig -NoNewline

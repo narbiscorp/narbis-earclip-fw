@@ -106,8 +106,17 @@ esp_err_t acq_imu_module_init(void)
      * surface it like any other init failure. */
     esp_err_t err = lis2dh12_init();
     if (err != ESP_OK) {
+#if NARBIS_BENCH_BUILD
+        /* Bare-XIAO bench build: no mainboard, no accel. Boot proceeds
+         * (BLE/console/OTA must work for pre-soldering prep); selftest
+         * T01/T02 report the absence honestly. */
+        ESP_LOGW(TAG, "BENCH: accel absent (%s) — continuing without it",
+                 esp_err_to_name(err));
+        return ESP_OK;
+#else
         ESP_LOGE(TAG, "lis2dh12_init failed (%s)", esp_err_to_name(err));
         return err;
+#endif
     }
     err = gpio_set_intr_type(PIN_ACC_INT1, GPIO_INTR_POSEDGE);
     if (err != ESP_OK) {

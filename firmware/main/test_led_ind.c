@@ -39,7 +39,11 @@ static const char *TAG = "led_ind";
 
 #define IND_IR_MA      25          /* 50 % of LED_IR_MAX_MA (50)  */
 #define IND_RED_MA     20          /* 50 % of LED_RED_MAX_MA (40) */
-#define IND_PERIOD_US  (500LL * 1000)
+#if NARBIS_BENCH_BUILD
+#define IND_PERIOD_US  (250LL * 1000)   /* bare-module spec: 2 Hz pulse */
+#else
+#define IND_PERIOD_US  (500LL * 1000)   /* functest: 1 Hz pulse         */
+#endif
 
 /* XIAO module onboard user LED (GPIO15, module-internal pin, active
  * LOW). Unlike the optical AFE indicator this one is never handed
@@ -87,7 +91,8 @@ void test_led_ind_start(void)
     s_phase_on = false;
     esp_timer_start_periodic(s_tmr, IND_PERIOD_US);
     ind_tick_cb(NULL);             /* first paint ASAP via sys_task */
-    ESP_LOGI(TAG, "connect indicator armed (1 Hz pulse @ 50%%)");
+    ESP_LOGI(TAG, "connect indicator armed (%d Hz pulse)",
+             (int)(1000000LL / (2 * IND_PERIOD_US)));
 }
 
 void test_led_ind_release(void)
@@ -143,8 +148,22 @@ void test_led_ind_poll(void)
     const uint8_t ir = on ? IND_IR_MA : 0;
     const uint8_t red = on ? IND_RED_MA : 0;
 
+    /* On a bare module (BENCH) there is no AFE: latch its absence after
+     * the first failed bring-up so the optical path goes quiet instead
+     * of warning at every tick. The onboard GPIO15 LED above is the
+     * whole indicator in that case. A power cycle re-probes (soldering
+     * to the mainboard implies one). */
+    static bool s_afe_absent;
+    if (s_afe_absent) {
+        return;
+    }
     if (test_ops_ensure_bench_afe() != ESP_OK) {
+#if NARBIS_BENCH_BUILD
+        s_afe_absent = true;
+        ESP_LOGW(TAG, "no AFE (bare module) — onboard LED only");
+#else
         ESP_LOGW(TAG, "bench AFE unavailable");
+#endif
         return;
     }
     if (afe4404_cur_ir_ma() != ir || afe4404_cur_red_ma() != red) {

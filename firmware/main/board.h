@@ -16,6 +16,16 @@
  *     compiles out. */
 #define NARBIS_TEST_MODE 0
 
+/* 1 = BENCH build for BARE XIAO modules (pre-soldering): sensor init
+ *     failures are tolerated (logged, marked absent — selftest fails
+ *     honestly), BLE + console + BOTH OTA paths stay up so the real
+ *     firmware can be loaded over the air after assembly, and the
+ *     module's onboard LED (GPIO15) pulses at 2 Hz / steady when
+ *     connected. Only meaningful together with NARBIS_TEST_MODE=1.
+ *     Production and vendor functest builds keep this 0: an assembled
+ *     board with a dead sensor must fail loudly, never limp. */
+#define NARBIS_BENCH_BUILD 0
+
 /* ------------------------------------------------------------------ */
 /* Pin map (XIAO ESP32-C6 castellated pads -> C6 GPIOs)                */
 /* ------------------------------------------------------------------ */
