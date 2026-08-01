@@ -21,6 +21,10 @@ Datasheet constraints enforced (SBAS689D):
   - CONTROL2 base: OSC_ENABLE(b9)=1; ILED_2X(b17)=0 ALWAYS (SFH 7016 red die
     DC abs-max + 3.3 V TX_SUP headroom); PDNAFE(b0)/PDNRX(b1)=0 in run.
   - LED3 unused: 0x36/0x37 written 0.
+  - t1 (LED start -> sample start) >= max[25 us, 0.2 x pulse] (p.24 Table 7).
+  - Cumulative LED duty <= 10% abs-max at ILED_2X=0 (p.6); 500 sps uses a
+    70 us sample window to stay under it with the 25 us lead.
+  - CONTROL3 (0x31) ENABLE_INPUT_SHORT=1 wherever DYNAMIC3 is used (p.29).
 
 Usage:
   python gen_afe_timing.py            regenerate firmware/main/afe4404_timing.inc
@@ -37,15 +41,23 @@ F_OSC_HZ      = 4_000_000   # internal oscillator (CONTROL2 OSC_ENABLE)
 TICK0_NS      = 250         # 1 / 4 MHz
 T_ADC_NS      = 250         # tADC per SBAS689D
 CONV_FIXED_NS = 15_000      # fixed 15 us term of the convert-window minimum
-SAMPLE_NS     = 100_000     # every sample window is exactly 100 us
 
 # Layout choices (documented in the emitted header):
-LED_LEAD_TICKS    = 20      # LED on -> sample start (LED + TIA settling)
+# t1 (start of LED to start of sampling) minimum per SBAS689D p.24 Table 7:
+# max[25 us, 0.2 x LED pulse]. The first release used 20 TICKS (5 us at /1)
+# — a ticks-vs-microseconds unit slip found in the 2026-08-01 LED audit.
+T1_LEAD_NS        = 25_000  # LED on -> sample start (LED + TIA settling)
 PHASE_GAP_TICKS   = 4       # gap between sample phases
 CONV_LEADIN_TICKS = 2       # ALED1ENDC -> first ADC reset
 ADCRST_TICKS      = 6       # ADC reset window width
 PDN_MARGIN_NS     = 200_000 # PDNCYCLE margin each side (datasheet minimum)
 PDN_PAD_TICKS     = 4       # extra ticks on top of the 200 us margins
+MAX_LED_DUTY      = 0.10    # abs-max cumulative LED duty, ILED_2X=0 (p.6)
+
+# CONTROL3 (0x31): ENABLE_INPUT_SHORT (b5) keeps the photodiode at zero
+# bias while DYNAMIC3 powers the TIA down mid-frame (p.29 mode 4) —
+# required at the dyn_pd rates, inert (and written 0) elsewhere.
+C3_INPUT_SHORT = 1 << 5
 
 CLKDIV_FIELD = {1: 0, 2: 4, 4: 5, 8: 6, 16: 7}   # divide -> register code
 FORBIDDEN_FIELDS = {1, 2, 3}
@@ -55,12 +67,15 @@ FORBIDDEN_FIELDS = {1, 2, 3}
 # (the (NUMAV+2)*200*tADC+15us convert minimum no longer fits 4x otherwise).
 # 50 sps MUST use /2: at /1 PRPCT would be 79999 (16-bit overflow) and the
 # timing engine has a 61 Hz floor at /1.
+# sample_ns: 100 us everywhere except 500 sps, where the 25 us t1 lead
+# would push cumulative LED duty to 2x125/2000 = 12.5% — over the 10%
+# abs-max (ILED_2X=0). 70 us keeps it at 2x95/2000 = 9.5%.
 RATES = [
-    dict(sps=50,  div=2, numav=15, dyn_pd=True),
-    dict(sps=100, div=1, numav=15, dyn_pd=True),
-    dict(sps=200, div=1, numav=15, dyn_pd=False),
-    dict(sps=250, div=1, numav=15, dyn_pd=False),
-    dict(sps=500, div=1, numav=5,  dyn_pd=False),
+    dict(sps=50,  div=2, numav=15, dyn_pd=True,  sample_ns=100_000),
+    dict(sps=100, div=1, numav=15, dyn_pd=True,  sample_ns=100_000),
+    dict(sps=200, div=1, numav=15, dyn_pd=False, sample_ns=100_000),
+    dict(sps=250, div=1, numav=15, dyn_pd=False, sample_ns=100_000),
+    dict(sps=500, div=1, numav=5,  dyn_pd=False, sample_ns=70_000),
 ]
 NC_RATE_NAMES = ["NC_RATE_50", "NC_RATE_100", "NC_RATE_200",
                  "NC_RATE_250", "NC_RATE_500"]
@@ -88,6 +103,7 @@ def us(ticks, tick_ns):
 # ---------------------------------------------------------------- derivation
 def build_rate(spec):
     sps, div, numav, dyn = spec["sps"], spec["div"], spec["numav"], spec["dyn_pd"]
+    sample_ns = spec["sample_ns"]
 
     req(div in CLKDIV_FIELD, f"{sps} sps: no CLKDIV code for /{div}")
     field = CLKDIV_FIELD[div]
@@ -110,12 +126,21 @@ def build_rate(spec):
 
     # Sample phases, order per datasheet default: RED(LED2), ambient-2,
     # IR(LED1), ambient-1. Uniform slot pitch; LED drive leads its sample
-    # window by LED_LEAD_TICKS and both end together.
-    s_ticks = SAMPLE_NS // tick_ns
-    req(s_ticks * tick_ns == SAMPLE_NS, f"{sps} sps: 100 us not integer ticks")
-    pitch = LED_LEAD_TICKS + s_ticks + PHASE_GAP_TICKS
+    # window by lead_ticks (t1) and both end together.
+    s_ticks = sample_ns // tick_ns
+    req(s_ticks * tick_ns == sample_ns, f"{sps} sps: sample not integer ticks")
+    lead_ticks = -(-T1_LEAD_NS // tick_ns)        # ceil: t1 >= 25 us
+    pulse_ns = (lead_ticks + s_ticks) * tick_ns   # LED on-time per phase
+    # t1 >= max[25 us, 0.2 x LED pulse] (SBAS689D p.24 Table 7).
+    req(lead_ticks * tick_ns >= max(25_000, 0.2 * pulse_ns),
+        f"{sps} sps: t1 lead {lead_ticks * tick_ns} ns below Table 7 minimum")
+    # Cumulative LED duty (both phases) <= 10% abs-max at ILED_2X=0 (p.6).
+    req(2 * pulse_ns <= MAX_LED_DUTY * period_ns,
+        f"{sps} sps: LED duty {2 * pulse_ns / period_ns:.1%} over "
+        f"{MAX_LED_DUTY:.0%} abs-max")
+    pitch = lead_ticks + s_ticks + PHASE_GAP_TICKS
     base = [k * pitch for k in range(4)]
-    smp = [(b + LED_LEAD_TICKS, b + LED_LEAD_TICKS + s_ticks - 1) for b in base]
+    smp = [(b + lead_ticks, b + lead_ticks + s_ticks - 1) for b in base]
     led2_drv = (base[0], smp[0][1])   # RED drive brackets slot 0 sample
     led1_drv = (base[2], smp[2][1])   # IR drive brackets slot 2 sample
     # LED drive must never overlap another phase's sample window (would
@@ -182,11 +207,11 @@ def build_rate(spec):
       f"(codes 1,2,3 forbidden)")
     win(0x01, 0x02, "LED2STC", "LED2ENDC", smp[0], "RED sample")
     win(0x03, 0x04, "LED1LEDSTC", "LED1LEDENDC", led1_drv, "IR LED drive",
-        extra=f" (leads IR sample by {LED_LEAD_TICKS} ticks)")
+        extra=f" (leads IR sample by {lead_ticks} ticks = t1 {lead_ticks*tick_ns/1000:.0f} us)")
     win(0x05, 0x06, "ALED2STC", "ALED2ENDC", smp[1], "ambient-2 sample")
     win(0x07, 0x08, "LED1STC", "LED1ENDC", smp[2], "IR sample")
     win(0x09, 0x0A, "LED2LEDSTC", "LED2LEDENDC", led2_drv, "RED LED drive",
-        extra=f" (leads RED sample by {LED_LEAD_TICKS} ticks)")
+        extra=f" (leads RED sample by {lead_ticks} ticks = t1 {lead_ticks*tick_ns/1000:.0f} us)")
     win(0x0B, 0x0C, "ALED1STC", "ALED1ENDC", smp[3], "ambient-1 sample")
     conv_extra = (f" >= (NUMAV+2)*200*tADC+15us = ({numav}+2)*200*{T_ADC_NS}ns+15us"
                   f" = {conv_min_ns / 1000:.2f} us")
@@ -210,6 +235,11 @@ def build_rate(spec):
         w(0x33, 0, "PDNCYCLEENDC =     0: dynamic PWDN unused at this rate")
     w(0x36, 0, "LED3LEDSTC   =     0: LED3/TX3 unused on this board")
     w(0x37, 0, "LED3LEDENDC  =     0: LED3/TX3 unused on this board")
+    w(0x31, C3_INPUT_SHORT if dyn else 0,
+      "CONTROL3: ENABLE_INPUT_SHORT(b5)="
+      + ("1: PD held at zero bias through the DYNAMIC3 TIA power-down "
+         "(p.29 mode 4; audit 2026-08-01)" if dyn else
+         "0: no dynamic TIA power-down at this rate"))
     w(0x23, control2,
       "CONTROL2: OSC_ENABLE(b9)"
       + (" | DYNAMIC1(b20)|DYNAMIC2(b14)|DYNAMIC3(b4)|DYNAMIC4(b3)" if dyn else "")
@@ -246,8 +276,8 @@ def generate():
     L.append(" *")
     L.append(" * Construction (window duration = END - ST + 1 ticks; tick = DIV/4MHz):")
     L.append(" *  - 4 sample phases in datasheet default order RED(LED2), ambient-2,")
-    L.append(f" *    IR(LED1), ambient-1; each sample window exactly 100 us; LED drive")
-    L.append(f" *    leads its sample window by {LED_LEAD_TICKS} ticks (LED + TIA settling);")
+    L.append(" *    IR(LED1), ambient-1; sample 100 us (70 us at 500 sps: 10% LED")
+    L.append(" *    duty abs-max); LED drive leads sampling by t1 >= 25 us (Table 7);")
     L.append(f" *    {PHASE_GAP_TICKS}-tick gaps between phases.")
     L.append(" *  - 4 conversions back-to-back after sampling, each preceded by its")
     L.append(f" *    {ADCRST_TICKS}-tick ADCRSTx window; convert >= (NUMAV+2)*200*tADC + 15 us")

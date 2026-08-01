@@ -129,6 +129,7 @@ static uint32_t tick_ns_of_field(uint8_t field)
 static int addr_documented(uint8_t reg)
 {
     return (reg >= 0x01 && reg <= 0x1D) ||    /* timing engine + PRPCT   */
+           reg == 0x31 ||                     /* CONTROL3: INPUT_SHORT   */
            reg == R_CONTROL2 ||
            reg == R_PDNCYCLESTC || reg == R_PDNCYCLEENDC ||
            reg == R_LED3LEDSTC || reg == R_LED3LEDENDC ||
@@ -204,6 +205,12 @@ static void t_windows_ranges(void)
 
 static void t_sample_phases(void)
 {
+    /* Sample window per rate: 100 us, except 500 sps where 70 us keeps
+     * cumulative LED duty under the 10% abs-max with the 25 us t1 lead
+     * (2026-08-01 LED audit — SBAS689D p.6 / p.24 Table 7). */
+    static const uint64_t SMP_NS[5] = {
+        100000, 100000, 100000, 100000, 70000,
+    };
     for (int r = 0; r < 5; r++) {
         const afe_rate_cfg_t *c = &AFE_RATE_TABLE[r];
         const uint64_t tick_ns = tick_ns_of_field(c->clkdiv_field);
@@ -212,8 +219,8 @@ static void t_sample_phases(void)
         for (int k = 0; k < 4; k++) {
             st[k] = rv(c, SMP[k][0]);
             end[k] = rv(c, SMP[k][1]);
-            /* window duration = END - ST + 1 ticks == exactly 100 us */
-            CHECK_EQ((uint64_t)(end[k] - st[k] + 1u) * tick_ns, SAMPLE_NS);
+            /* window duration = END - ST + 1 ticks == the rate's budget */
+            CHECK_EQ((uint64_t)(end[k] - st[k] + 1u) * tick_ns, SMP_NS[r]);
         }
         /* phase order RED, amb-2, IR, amb-1: strictly sequential */
         for (int k = 0; k < 3; k++) {
@@ -232,6 +239,23 @@ static void t_sample_phases(void)
         CHECK(ir_dst <= st[2] && ir_den >= end[2]);
         CHECK(ir_dst > end[1]);                        /* on after amb-2    */
         CHECK(ir_den < st[3]);                         /* off before amb-1  */
+
+        /* t1 (LED start -> sample start) >= max[25 us, 0.2 x pulse]
+         * (SBAS689D p.24 Table 7) — the original tables had 5 us. */
+        const uint64_t red_pulse = (uint64_t)(red_den - red_dst + 1u) * tick_ns;
+        const uint64_t ir_pulse  = (uint64_t)(ir_den - ir_dst + 1u) * tick_ns;
+        const uint64_t red_t1 = (uint64_t)(st[0] - red_dst) * tick_ns;
+        const uint64_t ir_t1  = (uint64_t)(st[2] - ir_dst) * tick_ns;
+        CHECK(red_t1 >= 25000 && red_t1 * 5 >= red_pulse);
+        CHECK(ir_t1 >= 25000 && ir_t1 * 5 >= ir_pulse);
+
+        /* Cumulative LED duty <= 10% abs-max at ILED_2X=0 (p.6). */
+        const uint64_t frame_ns = ((uint64_t)c->prpct + 1u) * tick_ns;
+        CHECK((red_pulse + ir_pulse) * 10 <= frame_ns);
+
+        /* CONTROL3 INPUT_SHORT accompanies DYNAMIC3 (p.29 mode 4). */
+        const uint32_t dyn3 = rv(c, R_CONTROL2) & (1u << 4);
+        CHECK_EQ(rv(c, 0x31), dyn3 ? (1u << 5) : 0u);
     }
 }
 
