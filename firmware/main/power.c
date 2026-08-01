@@ -283,6 +283,23 @@ void power_enter_off(bool battery_forced)
     gpio_wakeup_disable(PIN_BUTTON);
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
 
+    /* 5c. OFF fires on the hold-release, and "OFF + any press wakes" is
+     *     the spec — so a release BOUNCE (ms-scale contact chatter,
+     *     stretched by C22) that lands after ext1 arms is a legitimate-
+     *     looking wake press: the board powers off and pops right back
+     *     on (bench, 2026-08-01). Arm only after the button has read
+     *     released for 50 ms straight. Capped so a stuck-low button
+     *     still sleeps (it will wake once and ghost-classify, not hang
+     *     a dying battery here). */
+    {
+        int stable_ms = 0, waited_ms = 0;
+        while (stable_ms < 50 && waited_ms < 10000) {
+            stable_ms = (gpio_get_level(PIN_BUTTON) != 0) ? stable_ms + 10 : 0;
+            esp_rom_delay_us(10 * 1000);
+            waited_ms += 10;
+        }
+    }
+
     /* Remember why we slept: a ghost wake must re-sleep with the SAME
      * policy, or a battery-forced OFF loses its 12 h recheck forever. */
     s_off_batt_forced = battery_forced;
