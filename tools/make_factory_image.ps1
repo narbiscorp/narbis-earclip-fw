@@ -27,7 +27,12 @@ if ($orig -notmatch '#define NARBIS_TEST_MODE 0') {
 # Stamp BEFORE flipping board.h: the flip itself would make describe say
 # "-dirty" for every build. The TEST_MODE=1 delta is recorded separately
 # in the version line; the describe identifies the SOURCE tree.
-$ver = git -C $repo describe --tags --dirty --always
+# vendor\ is THIS script's own output — a stale bin/txt from the previous
+# build must not mark the SOURCE dirty (it did: every commit-then-rebuild
+# cycle stamped dirty until vendor\ was also committed).
+$ver = git -C $repo describe --tags --always
+$dirty = git -C $repo status --porcelain -- ':!vendor'
+if ($dirty) { $ver = "$ver-dirty" }
 try {
     Set-Content $board ($orig -replace '#define NARBIS_TEST_MODE 0',
                                       '#define NARBIS_TEST_MODE 1') -NoNewline
