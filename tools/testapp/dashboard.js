@@ -293,6 +293,17 @@ const NarbisDashCore = (() => {
       "to 0, hold at 0, repeat until stopped. Pick either LED or both. " +
       "Watch the PPG graph respond — a flat response means an open " +
       "emitter or flex-cable fault. Sliders lock while sweeping." },
+    "ctl.ledmax": { sel: "#btnLedMax", after: true, text:
+      "Drives the chosen dies at their ceiling (IR 50 mA, red 40 mA) for " +
+      "the set time, and switches to 500 sps first — that matters more " +
+      "than the current, because a die only lights during its sampling " +
+      "window: 1.25 % of the time at 100 sps but 4.75 % at 500 sps, right " +
+      "at the AFE's 10 % cumulative duty limit. Net result is about 8× " +
+      "the idle indicator's output — the brightest drive the hardware " +
+      "legally allows, for answering 'is this LED emitting at all'. Even " +
+      "then the glow is faint: look through a phone camera in a dark " +
+      "room, where the IR die reads as a purple-white dot. Your rate and " +
+      "slider settings are restored when it finishes." },
     "ctl.stream": { sel: "#btnStream", after: true, text:
       "Starts/stops the sensor streams (PPG + accel + beats + events). " +
       "Sensors only run while streaming — LEDs off and radio quiet " +
@@ -709,7 +720,7 @@ if (typeof document !== "undefined" && document.getElementById("dashPane"))
     if (c === lastConn) return;
     lastConn = c;
     for (const id of ["btnStream", "btnMarker", "btnSelftest", "btnDeepSleep",
-                      "btnSweep", "btnKnobSave", "btnKnobReset",
+                      "btnSweep", "btnLedMax", "btnKnobSave", "btnKnobReset",
                       "selTia", "selRate", "selOdr", "selFs"]) {
       $(id).disabled = !c;
     }
@@ -771,6 +782,57 @@ if (typeof document !== "undefined" && document.getElementById("dashPane"))
   }
   $("ledIr").oninput = () => ledChanged(P.AGC_APPLY_IR);
   $("ledRed").oninput = () => ledChanged(P.AGC_APPLY_RED);
+
+  /* ---- LED max-brightness visual check --------------------------------
+   * The AFE only lights a die during its sampling window, so average
+   * optical power is set by the RATE, not just the current: 125 us per
+   * 10 ms frame at 100 sps = 1.25 % duty, vs 95 us per 2 ms frame at
+   * 500 sps = 4.75 % (the tables are built to sit under the datasheet's
+   * 10 % cumulative abs-max). Rate 500 + max current is therefore the
+   * brightest legal drive — ~8x the idle connect indicator — and it is
+   * the only way to judge "is this die emitting at all" by eye/camera.
+   * Everything here uses existing ops; no firmware change. */
+  let ledMaxRunning = false;
+  $("btnLedMax").onclick = async () => {
+    if (ledMaxRunning) return;
+    const ir = $("mxIr").checked ? 50 : 0;      /* board.h LED_IR_MAX_MA  */
+    const red = $("mxRed").checked ? 40 : 0;    /* board.h LED_RED_MAX_MA */
+    if (!ir && !red) { err(new Error("pick IR and/or Red first")); return; }
+    const secs = Math.min(120, Math.max(1, +$("mxSecs").value || 20));
+    const prevRate = $("selRate").value;
+    const prevIr = $("ledIr").value, prevRed = $("ledRed").value;
+    const btn = $("btnLedMax");
+    ledMaxRunning = true;
+    btn.disabled = true;
+    try {
+      await ensureFrozen();                       /* AGC must not fight us */
+      await A.ctrl("setRate", [P.RATE_500]);
+      $("selRate").value = P.RATE_500;
+      if (!D.streaming) $("btnStream").onclick(); /* engine must be running */
+      await new Promise((r) => setTimeout(r, 400));
+      await A.ctrl("agcManual",
+                   [ir, red, 0, P.AGC_APPLY_IR | P.AGC_APPLY_RED]);
+      A.log(`LED max: IR ${ir} mA + RED ${red} mA @500 sps for ${secs} s`);
+      for (let left = secs; left > 0; left--) {
+        btn.textContent = `ON — ${left} s`;
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    } catch (e) {
+      err(e);
+    } finally {
+      /* Always wind back down, even if a step above threw. */
+      try {
+        await A.ctrl("agcManual",
+                     [+prevIr, +prevRed, 0, P.AGC_APPLY_IR | P.AGC_APPLY_RED]);
+        await A.ctrl("setRate", [+prevRate]);
+        $("selRate").value = prevRate;
+      } catch (e2) { A.log(`LED max restore: ${e2.message}`); }
+      btn.textContent = "Full brightness";
+      btn.disabled = false;
+      ledMaxRunning = false;
+      A.log("LED max: done, settings restored");
+    }
+  };
 
   /* selector fills */
   TIA_LABELS.forEach((lbl, code) => {

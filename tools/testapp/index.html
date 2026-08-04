@@ -210,6 +210,19 @@
             max="60" style="width:52px"> s</label>
           <button id="btnSweep" class="primary">Start</button>
         </fieldset>
+        <fieldset class="sweep-box">
+          <legend>LED max brightness (visual check)</legend>
+          <label><input type="checkbox" id="mxIr" checked> IR 50 mA</label>
+          <label><input type="checkbox" id="mxRed" checked> Red 40 mA</label>
+          <label>for <input type="number" id="mxSecs" value="20" min="1"
+            max="120" style="width:52px"> s</label>
+          <button id="btnLedMax" class="primary">Full brightness</button>
+          <div id="mxNote" class="muted small">Switches to 500 sps so each
+            LED runs at 4.75&nbsp;% optical duty (the datasheet's 10&nbsp;%
+            cumulative ceiling) — about 8&times; the idle indicator. Restores
+            your settings when it ends. Watch through a phone camera in a
+            dark room: IR shows as a purple-white dot.</div>
+        </fieldset>
         <div class="ctl-btns">
           <button id="btnStream" class="primary">Stream on</button>
           <button id="btnMarker">Marker</button>
