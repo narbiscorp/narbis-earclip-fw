@@ -95,7 +95,12 @@ static const char *TAG = "ble";
 #define CONN_ITVL_FAST_MAX   12     /* 15 ms   */
 #define CONN_ITVL_SLOW_MIN   24     /* 30 ms   */
 #define CONN_ITVL_SLOW_MAX   40     /* 50 ms   */
-#define CONN_TIMEOUT_10MS    400    /* 4 s supervision timeout */
+/* Supervision timeout. 4 s was too tight for a link that is still
+ * settling: one missed window during a central's opening procedures
+ * dropped the connection outright (bench 2026-08-04, 4 connect
+ * attempts before one stuck). 8 s costs nothing while connected and
+ * still detects a dead link well inside the app's own timeouts. */
+#define CONN_TIMEOUT_10MS    800    /* 8 s supervision timeout */
 
 /* ------------------------------------------------------------------ */
 /* State                                                               */
@@ -120,6 +125,13 @@ static bool s_adv_fast;
 static uint8_t s_own_addr_type;
 
 static esp_timer_handle_t s_adv_tmr;   /* fast -> slow one-shot */
+static esp_timer_handle_t s_tune_tmr;  /* deferred link tuning     */
+
+/* Wait after CONNECT before touching PHY/DLE/conn-params: long enough
+ * for a central to finish its own opening procedures (Windows: service
+ * discovery + MTU/PHY/param exchange), short enough that streaming
+ * reaches full speed well inside a normal session start. */
+#define LINK_TUNE_DELAY_US   (1500LL * 1000)
 static esp_timer_handle_t s_win_tmr;   /* pairing window one-shot */
 
 static char s_name[32];
@@ -649,6 +661,22 @@ static void apply_conn_params(void)
     }
 }
 
+/* esp_timer ctx: the deferred half of CONNECT (see the connect
+ * handler). Re-checks the link — a connection dropped during the delay
+ * leaves s_conn NONE and every call below would just fail. */
+static void link_tune_cb(void *arg)
+{
+    (void)arg;
+    const uint16_t c = s_conn;
+    if (c == BLE_HS_CONN_HANDLE_NONE) {
+        return;
+    }
+    (void)ble_gap_set_prefered_le_phy(c, BLE_GAP_LE_PHY_2M_MASK,
+                                      BLE_GAP_LE_PHY_2M_MASK, 0);
+    (void)ble_hs_hci_util_set_data_len(c, 251, 2120);
+    apply_conn_params();
+}
+
 /* ------------------------------------------------------------------ */
 /* GAP events (NimBLE host task)                                       */
 /* ------------------------------------------------------------------ */
@@ -687,12 +715,18 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         ESP_LOGI(TAG, "connected (handle %u, peer %s)", (unsigned)s_conn,
                  s_peer_was_bonded ? "bonded" : "new");
 
-        /* Link tuning: 2M PHY + DLE + interval policy. All best-effort;
-         * the central may override or reject any of them. */
-        (void)ble_gap_set_prefered_le_phy(s_conn, BLE_GAP_LE_PHY_2M_MASK,
-                                          BLE_GAP_LE_PHY_2M_MASK, 0);
-        (void)ble_hs_hci_util_set_data_len(s_conn, 251, 2120);
-        apply_conn_params();
+        /* Link tuning (2M PHY + DLE + interval policy) is DEFERRED by
+         * LINK_TUNE_DELAY_US instead of running here. Issuing three
+         * control procedures from inside the connect event collides
+         * with the central's own opening moves (Windows starts service
+         * discovery and its own MTU/PHY/param exchange immediately) —
+         * the LL can only run one procedure at a time, and the pile-up
+         * made connections fail 3-4 times before one stuck (bench,
+         * 2026-08-04). Letting the central finish first costs a few
+         * hundred ms of slow-interval streaming and nothing else; all
+         * three remain best-effort. */
+        esp_timer_stop(s_tune_tmr);   /* INVALID_STATE when idle: ignored */
+        (void)esp_timer_start_once(s_tune_tmr, LINK_TUNE_DELAY_US);
 
         post_conn_change(true);
         return 0;
@@ -700,6 +734,7 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI(TAG, "disconnected (reason %d)", event->disconnect.reason);
         s_conn = BLE_HS_CONN_HANDLE_NONE;
+        esp_timer_stop(s_tune_tmr);   /* no tuning for a dead link */
         clear_link_state();
         ble_tx_flush_all();
         dfu_legacy_on_disconnect();   /* abort a mid-flight legacy DFU */
@@ -930,6 +965,14 @@ esp_err_t ble_iface_init(void)
         const esp_timer_create_args_t win_args = { .callback = window_cb,
                                                    .name = "ble_pairwin" };
         err = esp_timer_create(&win_args, &s_win_tmr);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+    if (s_tune_tmr == NULL) {
+        const esp_timer_create_args_t tune_args = { .callback = link_tune_cb,
+                                                    .name = "ble_linktune" };
+        err = esp_timer_create(&tune_args, &s_tune_tmr);
         if (err != ESP_OK) {
             return err;
         }
