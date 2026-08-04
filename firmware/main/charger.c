@@ -46,7 +46,17 @@ static nc_charger_state_t charger_decode_stat(int stat_level)
 
 nc_charger_state_t charger_poll(bool *vusb_out)
 {
+#if NARBIS_BENCH_BUILD
+    /* Bare-module bench image: the VUSB divider and battery divider
+     * live on the carrier, so both pins FLOAT here — the firmware read
+     * a garbage-low battery on an invisible USB and powered itself off
+     * ~10 s after boot (killing the USB port mid-OTA-connect, bench
+     * 2026-08-04). A bench module is by definition USB-powered: report
+     * VUSB present, which suspends the on-battery low-power policy. */
+    const bool vusb = true;
+#else
     const bool vusb = gpio_get_level(PIN_VUSB_SENSE) != 0;
+#endif
     if (vusb_out != NULL) {
         *vusb_out = vusb;
     }

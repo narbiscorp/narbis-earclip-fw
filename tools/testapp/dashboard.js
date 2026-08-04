@@ -369,7 +369,10 @@ if (typeof document !== "undefined" && document.getElementById("dashPane"))
      * first hardware session read as "dashboard dead" because nothing
      * started the streams. Auto-start on tab entry; the Stream button
      * still toggles. */
-    if (!D.streaming && A.S.chars.control) {
+    /* Never auto-start streams while the guided sequence (or a flash)
+     * is running — the streamStart would stomp the active step's
+     * acquisition state mid-test. */
+    if (!D.streaming && A.S.chars.control && !A.onGuidedBusy()) {
       $("btnStream").onclick();
     }
   };

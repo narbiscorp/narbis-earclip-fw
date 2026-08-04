@@ -974,14 +974,26 @@ if (typeof document !== "undefined") (() => {
             ? "<br>over the placeholder limit — recorded as informational " +
               "(Narbis sets binding optical limits after first articles)"
             : ""));
+        /* T01's value is a BITMASK (b0 AFE@0x58, b1 accel@0x18,
+         * b2 accel@0x19-alt), not a count — a raw "2 vs thr 3" hid a
+         * transiently-NACKing AFE on the bench (2026-08-04). Name the
+         * missing device(s). */
+        let note = result === "info"
+          ? "over placeholder optical limit — informational, not a gate"
+          : (result === "fail" && opts.frameThr !== undefined
+             ? "hardware fault: frames missing / AFE bring-up failed" : "");
+        if (testId === P.TEST_I2C_SCAN && result === "fail") {
+          const names = ["AFE@0x58", "accel@0x18", "accel@0x19(alt)"];
+          const missing = names.filter((_, i) =>
+            (rec.threshold & (1 << i)) && !(rec.value & (1 << i)));
+          note = `NO ACK from: ${missing.join(", ") || "?"} (value is a ` +
+                 `presence bitmask, not a count)`;
+        }
         return {
           result,
           value: String(rec.value),
           expected: `thr ${rec.threshold}`,
-          note: result === "info"
-            ? "over placeholder optical limit — informational, not a gate"
-            : (result === "fail" && opts.frameThr !== undefined
-               ? "hardware fault: frames missing / AFE bring-up failed" : ""),
+          note,
         };
       },
     };
@@ -1167,10 +1179,24 @@ if (typeof document !== "undefined") (() => {
           "mounting axes, INT1 net and FIFO at max ODR.");
         const captured = new Set();
         let overruns = 0;
+        let sinkErrLogged = false;
         let unsub = await subscribe("accel", (ev) => {
           let b;
-          try { b = NP.parseAccel(ev.target.value); } catch (_) { return; }
-          if (S.sinks.accel) S.sinks.accel(b);
+          try { b = NP.parseAccel(ev.target.value); } catch (e) {
+            if (!sinkErrLogged) { sinkErrLogged = true; log(`accel parse error: ${e.message}`); }
+            return;
+          }
+          try {
+            if (S.sinks.accel) S.sinks.accel(b);
+          } catch (e) {
+            /* a throwing sink previously killed the step's rendering
+             * silently (bench, 2026-08-04) — surface it, once */
+            if (!sinkErrLogged) {
+              sinkErrLogged = true;
+              log(`accel step render error: ${e.message} @ ${e.stack ? e.stack.split("\n")[1] : "?"}`);
+              banner(`Accel step error: ${e.message}`, "error");
+            }
+          }
         });
         await ctx.race(ctrl("testAccelLive", [1]));
         let doneRes;
@@ -1724,6 +1750,19 @@ if (typeof document !== "undefined") (() => {
     getLogLines: () => S.logLines,
     onGuidedBusy: () => S.seqRunning || S.flashing || !!S.currentStep,
   };
+
+  /* Every uncaught error lands in the session log (and therefore the
+   * report JSON) — a silent JS exception cost a bench day when the
+   * accel step stopped rendering with nothing in the report
+   * (2026-08-04). Keep these AFTER NarbisApp so log() exists. */
+  window.addEventListener("error", (e) => {
+    log(`JS ERROR: ${e.message} @ ${(e.filename || "?").split("/").pop()}:${e.lineno}`);
+  });
+  window.addEventListener("unhandledrejection", (e) => {
+    const r = e.reason;
+    log(`PROMISE ERROR: ${(r && r.message) || r}` +
+        (r && r.stack ? ` @ ${r.stack.split("\n")[1]}` : ""));
+  });
 
   renderChecklist();
   if (!MOCK && !navigator.bluetooth) {
