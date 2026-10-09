@@ -52,6 +52,22 @@
  * Wear-on and unfreeze also re-acquire (the caller reports wear-on via
  * nc_agc_reacquire; freeze is an input). agc_mode = 0 keeps the legacy
  * continuous ladder, which never locks.
+ *
+ * Off-ear hold and put-back restore (first on-ear runs: the clip went
+ * on the table, the SAT re-acquire walked the LEDs down chasing an
+ * empty clip, and back on the ear it took longer than 30 s to climb
+ * back and lock):
+ *   - HOLD:    once this stream has locked, while the caller says
+ *              off_ear nothing is evaluated — no ladder, no SAT/DRIFT
+ *              runs — for at most agc_offear_hold_s (0 = never hold).
+ *              The bound keeps a wrong "off" verdict (a worn clip driven
+ *              to the rail) from freezing the gain for good.
+ *   - RESTORE: every lock records LED / gain / offdac. A re-acquire with
+ *              reason WEAR then first sets them back (gain + LEDs, then
+ *              the offdacs one hold window later) and only then lets the
+ *              ladder run. The record survives nc_agc_restart (a new
+ *              stream): the same wearer's settings beat a climb from the
+ *              minimum. nc_agc_init clears it.
  */
 #pragma once
 #include <stdint.h>
@@ -88,6 +104,7 @@ typedef struct {
     int8_t   offdac[2];
     uint64_t now_ms;
     bool     frozen;     /* NC_OP_AGC_FREEZE */
+    bool     off_ear;    /* wear detector: not worn (false = worn / unknown) */
 } nc_agc_in_t;
 
 typedef enum {
@@ -127,10 +144,26 @@ typedef struct {
     uint64_t drift_since_ms;
     uint64_t locked_ms;
     uint64_t last_beat_ms;   /* time of the last clean beat              */
+    /* off-ear hold (cleared by nc_agc_init / nc_agc_restart) */
+    bool     locked_this_stream; /* LOCKED reached since nc_agc_init     */
+    bool     offear_run;     /* off_ear on every evaluation since ...    */
+    uint64_t offear_since_ms;
+    uint8_t  restore_phase;  /* 0 none, 1 gain + LEDs, 2 offdacs pending */
+    /* put-back restore record (kept by nc_agc_restart, cleared by
+     * nc_agc_init) */
+    bool     lock_cfg_valid;
+    uint8_t  lock_led_ma[2];
+    uint8_t  lock_rf_code;
+    int8_t   lock_offdac[2];
 } nc_agc_t;
 
-/* -> ACQUIRE with reason START, and a pending change edge. */
+/* -> ACQUIRE with reason START, and a pending change edge. Clears the
+ * put-back restore record. */
 void nc_agc_init(nc_agc_t *s);
+
+/* nc_agc_init for a new stream on the same device: keeps the restore
+ * record (zero-initialised storage = no record). */
+void nc_agc_restart(nc_agc_t *s);
 
 /* Returns the number of actions written to out[] (0..4: worst case is
  * one GAIN + two OFFDAC recenters, or one LED/OFFDAC per channel).
@@ -147,7 +180,8 @@ void nc_agc_on_beat(nc_agc_t *s, uint16_t ibi_ms, uint8_t ibi_flags,
 
 /* Restart acquisition from outside (wear-on). LOCKED -> ACQUIRE with
  * `reason` and a change edge; already ACQUIRE -> counters restart, no
- * edge; OFF (frozen/disabled) -> ignored, the unfreeze re-acquires. */
+ * edge; OFF (frozen/disabled) -> ignored, the unfreeze re-acquires.
+ * Reason WEAR with a lock record also schedules the RESTORE (header). */
 void nc_agc_reacquire(nc_agc_t *s, uint8_t reason);
 
 /* True once per state transition (then clears) — the caller emits

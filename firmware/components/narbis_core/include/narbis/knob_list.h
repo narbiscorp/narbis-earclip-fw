@@ -66,6 +66,9 @@ X(AGC_LOCK_BAND_PCT,   0x0410, "agc_lock_band_pct",     NC_KNOB_U8,      10,    
 X(AGC_REACQ_SAT_MS,    0x0411, "agc_reacq_sat_ms",      NC_KNOB_U16,    500,  30000,   3000, "ms",    KPL) \
 X(AGC_REACQ_DRIFT_MS,  0x0412, "agc_reacq_drift_ms",    NC_KNOB_U16,   1000,  60000,  15000, "ms",    KPL) \
 X(AGC_REACQ_MIN_S,     0x0413, "agc_reacq_min_s",       NC_KNOB_U16,      5,   3600,     30, "s",     KPL) \
+/*   off-ear hold: once a stream has locked, leave the settings alone while the    */ \
+/*   wear detector says off-ear, for at most this long (0 = never hold).           */ \
+X(AGC_OFFEAR_HOLD_S,   0x0414, "agc_offear_hold_s",     NC_KNOB_U16,      0,    600,     20, "s",     KPL) \
 /* -- DSP (0x05xx) ------------------------------------------------------------------ */ \
 X(HP_FC_X100,          0x0501, "hp_fc_x100",            NC_KNOB_U16,     10,    200,     50, "cHz",   KPS) \
 X(BP_LO_X100,          0x0502, "bp_lo_x100",            NC_KNOB_U16,     20,    200,     50, "cHz",   KPS) \
@@ -95,10 +98,19 @@ X(ACC_ODR,             0x0801, "acc_odr",               NC_KNOB_U8,       0,    
 X(ACC_FS,              0x0802, "acc_fs",                NC_KNOB_U8,       0,      3,      1, "code",  KPS) \
 X(ACC_STREAM_EN,       0x0803, "acc_stream_en",         NC_KNOB_BOOL,     0,      1,      1, "",      KPL) \
 /* -- wear detection (0x09xx) ------------------------------------------------------- */ \
-X(WEAR_ON_THR,         0x0901, "wear_on_thr",           NC_KNOB_I32,      0, 4194304, 20000, "cnt",   KPL) \
-X(WEAR_OFF_THR,        0x0902, "wear_off_thr",          NC_KNOB_I32,      0, 4194304, 10000, "cnt",   KPL) \
+/*   DC thresholds are on the ambient-subtracted IR DC. V2.1 earlobe, AGC locked:   */ \
+/*   ~565k; empty clip in air ~35k; empty clip on a table: raw IR at the rail.      */ \
+X(WEAR_ON_THR,         0x0901, "wear_on_thr",           NC_KNOB_I32,      0, 4194304, 2050000, "cnt", KPL) \
+X(WEAR_OFF_THR,        0x0902, "wear_off_thr",          NC_KNOB_I32,      0, 4194304, 1900000, "cnt", KPL) \
 X(WEAR_OFF_S,          0x0903, "wear_off_s",            NC_KNOB_U16,      5,    600,     30, "s",     KPL) \
-X(WEAR_DARK_THR,       0x0904, "wear_dark_thr",         NC_KNOB_I32,      0, 4194304,  2000, "cnt",   KPL) \
+X(WEAR_DARK_THR,       0x0904, "wear_dark_thr",         NC_KNOB_I32,      0, 4194304, 100000, "cnt",  KPL) \
+/*   fast off: raw IR held at the ADC rail this many whole seconds = empty clip.   */ \
+X(WEAR_RAIL_S,         0x0905, "wear_rail_s",           NC_KNOB_U8,       1,     30,      2, "s",     KPL) \
+/*   handling jolt (gate accel energy, cnt^2): within wear_jolt_win_s of one, the  */ \
+/*   off countdown is wear_jolt_off_s instead of wear_off_s.                        */ \
+X(WEAR_JOLT_THR,       0x0906, "wear_jolt_thr",         NC_KNOB_I32,   1000, 100000000, 400000, "cnt2", KPL) \
+X(WEAR_JOLT_OFF_S,     0x0907, "wear_jolt_off_s",       NC_KNOB_U16,      1,    600,      3, "s",     KPL) \
+X(WEAR_JOLT_WIN_S,     0x0908, "wear_jolt_win_s",       NC_KNOB_U16,      1,    600,     10, "s",     KPL) \
 /* -- self-test thresholds (0x0Axx, bench-tuned; VERIFY-ON-BENCH) ------------------- */ \
 X(ST_DARK_NOISE_MAX,   0x0A01, "st_dark_noise_max",     NC_KNOB_I32,      1, 4194304,   200, "cntRMS",KPL) \
 X(ST_DARK_AMB_MAX,     0x0A02, "st_dark_amb_max",       NC_KNOB_I32,      1, 4194304,  5000, "cnt",   KPL) \

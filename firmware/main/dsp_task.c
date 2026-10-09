@@ -107,6 +107,9 @@ static bool s_sat_win[2];
 /* 1 Hz tick + gate duty over a rolling 60 s. */
 static uint32_t s_sec_cnt, s_sec_gated;
 static int64_t s_bp_pow_acc, s_bp_pow_last;
+/* wear fast-off evidence, per second: raw IR rail samples, peak accel
+ * gate energy (nc_wear.h rail / jolt) */
+static uint32_t s_sec_sat_ir, s_sec_acc_max;
 static uint16_t s_duty_gated[DUTY_RING_S], s_duty_total[DUTY_RING_S];
 static uint32_t s_duty_sum_g, s_duty_sum_t;
 static uint8_t s_duty_idx;
@@ -237,6 +240,8 @@ static void dsp_apply_reset(uint32_t req)
     s_sat_win[0] = s_sat_win[1] = false;
     s_sec_cnt = 0;
     s_sec_gated = 0;
+    s_sec_sat_ir = 0;
+    s_sec_acc_max = 0;
     s_bp_pow_acc = 0;
 
     if (full) {
@@ -244,7 +249,7 @@ static void dsp_apply_reset(uint32_t req)
         s_prev_gated = false;
         atomic_store(&g_acq_batch_bits, 0);
 
-        nc_agc_init(&s_agc);
+        nc_agc_restart(&s_agc);         /* keeps the put-back record */
         s_offdac[0] = s_offdac[1] = 0;  /* afe4404_init zeroed the DACs */
 
         nc_wear_init(&s_wear);
@@ -364,6 +369,7 @@ static void agc_tick(uint64_t t_us)
         .offdac  = { s_offdac[0], s_offdac[1] },
         .now_ms  = t_us / 1000u,
         .frozen  = atomic_load(&g_acq_agc_frozen),
+        .off_ear = !nc_wear_is_worn(&s_wear),   /* off-ear HOLD (nc_agc.h) */
     };
     s_sat_win[0] = s_sat_win[1] = false;
 
@@ -395,8 +401,17 @@ static void one_hz_tick(void)
     s_bp_pow_last = s_bp_pow_acc;
     s_bp_pow_acc = 0;
 
-    /* Wear runs on the IR channel regardless of the IBI channel knob. */
-    nc_wear_tick_1hz(&s_wear, s_ch[0].dc, s_bp_pow_last);
+    /* Wear runs on the IR channel regardless of the IBI channel knob.
+     * rail: >= 90 % of this second's raw IR samples at the rail. */
+    const nc_wear_in_t win = {
+        .dc_ir = s_ch[0].dc,
+        .bp_power_1s = s_bp_pow_last,
+        .rail = s_sec_cnt > 0 && (uint64_t)s_sec_sat_ir * 10u >= (uint64_t)s_sec_cnt * 9u,
+        .jolt = s_sec_acc_max >= (uint32_t)nc_knob_get(KNOB_WEAR_JOLT_THR),
+    };
+    s_sec_sat_ir = 0;
+    s_sec_acc_max = 0;
+    nc_wear_tick(&s_wear, &win);
     bool worn = nc_wear_is_worn(&s_wear);
     if (worn != s_prev_worn) {
         s_prev_worn = worn;
@@ -463,6 +478,13 @@ static void dsp_process(const nc_ppg_sample_t *s)
     bool sat_red = (s->red >= thr) || (s->red <= -thr);
     s_sat_win[0] |= sat_ir;
     s_sat_win[1] |= sat_red;
+    if (sat_ir) {
+        s_sec_sat_ir++;
+    }
+    const uint32_t acc_e = atomic_load(&g_acq_acc_energy);
+    if (acc_e > s_sec_acc_max) {
+        s_sec_acc_max = acc_e;
+    }
 
     portENTER_CRITICAL(&s_blank_mux);
     uint64_t blank = s_blank_until_us;   /* u64: no atomic load on RV32 */
@@ -474,7 +496,7 @@ static void dsp_process(const nc_ppg_sample_t *s)
     /* amp_collapse is an IBI-side input not wired in v1 (task scope);
      * gate reason COLLAPSE stays available on the wire. */
     nc_gate_in_t gin;
-    nc_gate_build_input(&gin, &s_dcstep, atomic_load(&g_acq_acc_energy),
+    nc_gate_build_input(&gin, &s_dcstep, acc_e,
                         o[sel].dc, sat_ir || sat_red, false, settling,
                         wear_off);
     uint8_t reason = 0;
@@ -508,8 +530,12 @@ static void dsp_process(const nc_ppg_sample_t *s)
         portEXIT_CRITICAL(&s_tap_mux);
     }
 
+    /* Off-ear beats are noise however the artifact gate is set (the
+     * gate_en master switch is a debug knob; not-worn is not an artifact
+     * judgement). First on-ear runs: ~150 bpm junk while the clip lay on
+     * the table. */
     nc_ibi_rec_t rec;
-    if (nc_ibi_update(&s_ibi, o[sel].bp, s->t_us, gated, &rec)) {
+    if (nc_ibi_update(&s_ibi, o[sel].bp, s->t_us, gated || wear_off, &rec)) {
         on_beat(&rec);
     }
 

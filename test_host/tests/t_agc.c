@@ -35,6 +35,7 @@ typedef struct {
     uint64_t now;
     bool     frozen;
     int32_t  noise[2];   /* additive dc noise for this read */
+    bool     off_ear;    /* wear detector verdict fed to the AGC */
 } plant_t;
 
 static int64_t plant_ideal(const plant_t *p, int c)
@@ -57,6 +58,7 @@ static void plant_read(const plant_t *p, nc_agc_in_t *in)
     in->rf_code = p->rf;
     in->now_ms = p->now;
     in->frozen = p->frozen;
+    in->off_ear = p->off_ear;
 }
 
 static bool in_band(const plant_t *p, int c)
@@ -787,6 +789,140 @@ static void test_reacquire_api_and_mode_switch(void)
     CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);
 }
 
+/* Clip taken off after a lock (first on-ear runs): the wear detector says
+ * off-ear and the empty clip rails the ADC. For agc_offear_hold_s (20 s)
+ * nothing moves and the clipping does not count toward SAT; after that the
+ * ordinary 3 s SAT rule takes over. */
+static void test_offear_hold_keeps_lock(void)
+{
+    nc_knobs_init();
+    nc_agc_t s;
+    nc_agc_init(&s);
+    plant_t p = converged_plant();
+    nc_agc_act_t acts[4];
+    lock_stable(&s, &p);                              /* locked at 8000 */
+
+    p.now = 60000;                                    /* past min spacing */
+    const uint64_t off_at = p.now;
+    p.off_ear = true;
+    p.k[0] = 450000;                                  /* 5 mA -> 2.25M: rail */
+    while (p.now < off_at + 20000) {
+        CHECK_EQ(drive_dt(&s, &p, acts, 500), 0);
+        CHECK_EQ(s.state, NC_AGC_ST_LOCKED);
+    }
+    CHECK_EQ(s.reacq_count, 0);
+    CHECK(!nc_agc_take_change(&s));
+
+    /* Hold over at off_at + 20 s: the SAT run only starts there. */
+    while (p.now < off_at + 23000) {
+        CHECK_EQ(drive_dt(&s, &p, acts, 500), 0);
+        CHECK_EQ(s.state, NC_AGC_ST_LOCKED);
+    }
+    CHECK(drive_dt(&s, &p, acts, 500) > 0);
+    CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);
+    CHECK_EQ(s.reason, NC_AGC_RSN_SAT);
+
+    /* agc_offear_hold_s = 0 disables the hold: plain SAT timing. */
+    nc_knobs_init();
+    CHECK_EQ(nc_knob_set_id(0x0414, 0), NC_ST_OK);
+    nc_agc_init(&s);
+    p = converged_plant();
+    lock_stable(&s, &p);
+    p.now = 60000;
+    p.off_ear = true;
+    p.k[0] = 450000;
+    for (int i = 0; i < 6; i++) CHECK_EQ(drive_dt(&s, &p, acts, 500), 0);
+    CHECK(drive_dt(&s, &p, acts, 500) > 0);           /* 3 s after the rail */
+    CHECK_EQ(s.reason, NC_AGC_RSN_SAT);
+    nc_knobs_init();
+}
+
+/* The hold needs a lock in THIS stream: a stream that starts off-ear (or
+ * before the wear detector has judged it) still acquires from dark, even
+ * when an earlier stream locked. */
+static void test_offear_hold_needs_a_lock_this_stream(void)
+{
+    nc_knobs_init();
+    nc_agc_t s;
+    nc_agc_init(&s);
+    nc_agc_act_t acts[4];
+    plant_t p = { .k = { 150000, 200000 }, .dacg = { 10000, 10000 },
+                  .led = { 2, 2 }, .od = { 0, 0 }, .rf = 2, .off_ear = true };
+    CHECK(drive(&s, &p, acts) > 0);                   /* 300k: steps up */
+    CHECK_EQ(p.led[0], 3);
+
+    nc_agc_init(&s);
+    p = converged_plant();
+    lock_stable(&s, &p);
+    nc_agc_restart(&s);                               /* next stream */
+    p.led[0] = p.led[1] = 2;
+    p.off_ear = true;
+    CHECK(drive(&s, &p, acts) > 0);
+    CHECK_EQ(p.led[0], 3);
+}
+
+/* Put back on: re-acquire with reason WEAR first restores the settings of
+ * the last lock (gain + LEDs, then offdacs one hold window later) instead
+ * of climbing from wherever the empty clip left them. */
+static void test_putback_restores_lock_settings(void)
+{
+    nc_knobs_init();
+    nc_agc_t s;
+    nc_agc_init(&s);
+    nc_agc_act_t acts[4];
+    plant_t p = converged_plant();
+    p.od[0] = 1;                                      /* IR  760k, in band */
+    p.od[1] = -1;                                     /* RED 790k, in band */
+    lock_stable(&s, &p);                              /* led 5/4 rf 2 od 1/-1 */
+
+    /* What the empty clip left behind. */
+    p.led[0] = 2;
+    p.led[1] = 2;
+    p.rf = 3;
+    p.od[0] = p.od[1] = 0;
+    nc_agc_reacquire(&s, NC_AGC_RSN_WEAR);
+    CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);
+    CHECK_EQ(s.reason, NC_AGC_RSN_WEAR);
+    CHECK(nc_agc_take_change(&s));
+
+    CHECK_EQ(drive(&s, &p, acts), 3);                 /* gain + both LEDs */
+    CHECK_EQ(p.rf, 2);
+    CHECK_EQ(p.led[0], 5);
+    CHECK_EQ(p.led[1], 4);
+    CHECK_EQ(p.od[0], 0);                             /* not yet */
+    CHECK_EQ(drive(&s, &p, acts), 2);                 /* next hold window */
+    CHECK_EQ(p.od[0], 1);
+    CHECK_EQ(p.od[1], -1);
+    for (int i = 0; i < 10 && s.state != NC_AGC_ST_LOCKED; i++) {
+        CHECK_EQ(drive(&s, &p, acts), 0);             /* already right */
+    }
+    CHECK_EQ(s.state, NC_AGC_ST_LOCKED);
+
+    /* The record survives a new stream ... */
+    nc_agc_restart(&s);
+    p.led[0] = p.led[1] = 2;
+    nc_agc_reacquire(&s, NC_AGC_RSN_WEAR);
+    CHECK_EQ(drive(&s, &p, acts), 2);
+    CHECK_EQ(p.led[0], 5);
+    CHECK_EQ(p.led[1], 4);
+
+    /* ... but not nc_agc_init, and no record means a plain ladder step. */
+    nc_agc_init(&s);
+    p.led[0] = p.led[1] = 2;
+    nc_agc_reacquire(&s, NC_AGC_RSN_WEAR);
+    CHECK(drive(&s, &p, acts) > 0);
+    CHECK_EQ(p.led[0], 3);
+
+    /* Other re-acquire reasons never restore. */
+    nc_agc_init(&s);
+    p = converged_plant();
+    lock_stable(&s, &p);
+    p.led[0] = 2;
+    nc_agc_reacquire(&s, NC_AGC_RSN_MANUAL);
+    CHECK(drive(&s, &p, acts) > 0);
+    CHECK_EQ(p.led[0], 3);
+}
+
 int main(void)
 {
     nc_knobs_init();
@@ -812,5 +948,8 @@ int main(void)
     TST_RUN(test_drift_reacquire_waits_for_beats_to_stop);
     TST_RUN(test_freeze_unfreeze_edges);
     TST_RUN(test_reacquire_api_and_mode_switch);
+    TST_RUN(test_offear_hold_keeps_lock);
+    TST_RUN(test_offear_hold_needs_a_lock_this_stream);
+    TST_RUN(test_putback_restores_lock_settings);
     TST_REPORT();
 }

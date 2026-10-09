@@ -55,13 +55,27 @@ static void to_acquire(nc_agc_t *s, uint8_t reason)
     enter(s, NC_AGC_ST_ACQUIRE, reason);
 }
 
-static void to_locked(nc_agc_t *s, uint8_t reason, uint64_t now_ms)
+static void to_locked(nc_agc_t *s, uint8_t reason, const nc_agc_in_t *in)
 {
     enter(s, NC_AGC_ST_LOCKED, reason);
-    s->locked_ms = now_ms;
+    s->locked_ms = in->now_ms;
+    s->locked_this_stream = true;
+    /* The settings this wearer locked at: the put-back restore target. */
+    s->lock_cfg_valid = true;
+    s->lock_rf_code = in->rf_code;
+    for (int c = 0; c < 2; c++) {
+        s->lock_led_ma[c] = in->led_ma[c];
+        s->lock_offdac[c] = in->offdac[c];
+    }
 }
 
 void nc_agc_init(nc_agc_t *s)
+{
+    s->lock_cfg_valid = false;
+    nc_agc_restart(s);
+}
+
+void nc_agc_restart(nc_agc_t *s)
 {
     s->last_step_ms = 0;
     s->stepped_once = false;
@@ -70,6 +84,11 @@ void nc_agc_init(nc_agc_t *s)
     s->last_beat_ms = 0;
     s->quiet_since_ms = s->sat_since_ms = s->drift_since_ms = 0;
     s->locked_ms = 0;
+    s->locked_this_stream = false;
+    s->offear_run = false;
+    s->offear_since_ms = 0;
+    s->restore_phase = 0;
+    /* lock_cfg_* kept: see RESTORE in nc_agc.h. */
     enter(s, NC_AGC_ST_ACQUIRE, NC_AGC_RSN_START);
 }
 
@@ -92,8 +111,12 @@ void nc_agc_reacquire(nc_agc_t *s, uint8_t reason)
     } else if (s->state == NC_AGC_ST_ACQUIRE) {
         s->clean_beats = 0;          /* fresh start, no edge */
         s->quiet = false;
+    } else {
+        return;   /* OFF: frozen or disabled wins; the unfreeze re-acquires. */
     }
-    /* OFF: frozen or disabled wins; the unfreeze re-acquires. */
+    if (reason == NC_AGC_RSN_WEAR && s->lock_cfg_valid) {
+        s->restore_phase = 1;        /* put back on: start from the lock */
+    }
 }
 
 bool nc_agc_take_change(nc_agc_t *s)
@@ -122,18 +145,11 @@ static int emit(nc_agc_act_t *out, int n, nc_agc_kind_t kind,
     return n + 1;
 }
 
-static int ladder(nc_agc_t *s, const nc_agc_in_t *in, const agc_band_t *b,
-                  nc_agc_act_t out[4])
+/* Effective per-channel LED limits: knob range intersected with the
+ * hard abs-max clamps. A min knob above the effective max (operator
+ * error) degrades to min == max rather than an inverted range. */
+static void led_limits(int32_t minma[2], int32_t maxma[2])
 {
-    const int32_t lo = b->lo;
-    const int32_t hi = b->hi;
-    const int32_t step = nc_knob_get(KNOB_AGC_STEP_MA);
-    const bool od_en = nc_knob_get(KNOB_AGC_OFFDAC_EN) != 0;
-
-    /* Effective per-channel LED limits: knob range intersected with the
-     * hard abs-max clamps. A min knob above the effective max (operator
-     * error) degrades to min == max rather than an inverted range. */
-    int32_t minma[2], maxma[2];
     minma[NC_AGC_CH_IR] = nc_knob_get(KNOB_AGC_MIN_MA_IR);
     maxma[NC_AGC_CH_IR] = nc_knob_get(KNOB_AGC_MAX_MA_IR);
     if (maxma[NC_AGC_CH_IR] > NC_AGC_HARD_MAX_IR_MA)
@@ -145,6 +161,18 @@ static int ladder(nc_agc_t *s, const nc_agc_in_t *in, const agc_band_t *b,
     for (int c = 0; c < 2; c++) {
         if (minma[c] > maxma[c]) minma[c] = maxma[c];
     }
+}
+
+static int ladder(nc_agc_t *s, const nc_agc_in_t *in, const agc_band_t *b,
+                  nc_agc_act_t out[4])
+{
+    const int32_t lo = b->lo;
+    const int32_t hi = b->hi;
+    const int32_t step = nc_knob_get(KNOB_AGC_STEP_MA);
+    const bool od_en = nc_knob_get(KNOB_AGC_OFFDAC_EN) != 0;
+
+    int32_t minma[2], maxma[2];
+    led_limits(minma, maxma);
 
     int n = 0;
 
@@ -214,6 +242,51 @@ static int ladder(nc_agc_t *s, const nc_agc_in_t *in, const agc_band_t *b,
         s->stepped_once = true;
     }
     return n;
+}
+
+/* RESTORE (nc_agc.h), in place of a ladder step. Phase 1 sets gain +
+ * LEDs, phase 2 (next hold window, so it lands under the restored gain)
+ * the offdacs; a phase with nothing to change falls through, and once
+ * done the ladder takes over in the same call. */
+static int restore(nc_agc_t *s, const nc_agc_in_t *in, const agc_band_t *b,
+                   nc_agc_act_t out[4])
+{
+    int n = 0;
+    if (s->restore_phase == 1) {
+        s->restore_phase = 2;
+        int32_t minma[2], maxma[2];
+        led_limits(minma, maxma);
+        if (s->lock_rf_code != in->rf_code) {
+            n = emit(out, n, NC_AGC_GAIN, 0, 0, 0, s->lock_rf_code);
+        }
+        for (int c = 0; c < 2; c++) {
+            const uint8_t l = (uint8_t)nc_clamp_i32(s->lock_led_ma[c],
+                                                    minma[c], maxma[c]);
+            if (l != in->led_ma[c]) {
+                n = emit(out, n, NC_AGC_LED, (uint8_t)c, l, 0, 0);
+            }
+        }
+        if (n > 0) {
+            s->last_step_ms = in->now_ms;
+            s->stepped_once = true;
+            return n;
+        }
+    }
+    s->restore_phase = 0;
+    if (nc_knob_get(KNOB_AGC_OFFDAC_EN) != 0) {
+        for (int c = 0; c < 2; c++) {
+            if (s->lock_offdac[c] != in->offdac[c]) {
+                n = emit(out, n, NC_AGC_OFFDAC, (uint8_t)c, 0,
+                         s->lock_offdac[c], 0);
+            }
+        }
+    }
+    if (n > 0) {
+        s->last_step_ms = in->now_ms;
+        s->stepped_once = true;
+        return n;
+    }
+    return ladder(s, in, b, out);
 }
 
 /* ------------------------------------------------------------------ */
@@ -294,7 +367,7 @@ static void acquire_progress(nc_agc_t *s, const nc_agc_in_t *in,
     }
     if (s->clean_beats >= (uint8_t)nc_knob_get(KNOB_AGC_LOCK_BEATS) &&
         both_within(in, b->lock_lo, b->lock_hi)) {
-        to_locked(s, NC_AGC_RSN_BEATS, in->now_ms);
+        to_locked(s, NC_AGC_RSN_BEATS, in);
         return;
     }
     if (!ran) {
@@ -306,7 +379,7 @@ static void acquire_progress(nc_agc_t *s, const nc_agc_in_t *in,
             s->quiet_since_ms = in->now_ms;
         } else if (in->now_ms - s->quiet_since_ms >=
                    (uint64_t)nc_knob_get(KNOB_AGC_LOCK_STABLE_MS)) {
-            to_locked(s, NC_AGC_RSN_STABLE, in->now_ms);
+            to_locked(s, NC_AGC_RSN_STABLE, in);
         }
     } else {
         s->quiet = false;
@@ -343,13 +416,36 @@ int nc_agc_evaluate(nc_agc_t *s, const nc_agc_in_t *in, nc_agc_act_t out[4])
         .lock_lo = target - lock, .lock_hi = target + lock,
     };
 
+    /* Off-ear HOLD (nc_agc.h): after a lock in this stream, an off-ear
+     * clip is left exactly as it was, for at most agc_offear_hold_s. The
+     * LOCKED runs restart afterwards so the hold cannot count toward a
+     * SAT / DRIFT re-acquire. */
+    if (in->off_ear) {
+        if (!s->offear_run) {
+            s->offear_run = true;
+            s->offear_since_ms = in->now_ms;
+        }
+    } else {
+        s->offear_run = false;
+    }
+    const uint64_t hold_ms = (uint64_t)nc_knob_get(KNOB_AGC_OFFEAR_HOLD_S) * 1000u;
+    if (lock_mode && s->locked_this_stream && s->offear_run &&
+        in->now_ms - s->offear_since_ms < hold_ms) {
+        s->sat_run = false;
+        s->drift_run = false;
+        return 0;
+    }
+
     if (s->state == NC_AGC_ST_LOCKED && !locked_wants_reacquire(s, in, &b)) {
         return 0;                           /* locked: nothing moves */
     }
 
     const uint32_t hold = (uint32_t)nc_knob_get(KNOB_AGC_HOLD_MS);
     const bool ran = !s->stepped_once || (in->now_ms - s->last_step_ms) >= hold;
-    const int n = ran ? ladder(s, in, &b, out) : 0;
+    int n = 0;
+    if (ran) {
+        n = s->restore_phase ? restore(s, in, &b, out) : ladder(s, in, &b, out);
+    }
 
     if (lock_mode && s->state == NC_AGC_ST_ACQUIRE) {
         acquire_progress(s, in, &b, n, ran);
