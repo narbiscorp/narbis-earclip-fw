@@ -26,6 +26,11 @@
  *  - !usb_stream_ok (stream_on_usb=0 while charging) forces everything
  *    off, unconditionally.
  *  - dsp_on == ppg_on (the DSP chain has no other consumer).
+ *  - standby (no central, no stream; caller decides): standby_watch runs
+ *    the accel for the ear-posture check (nc_posture.h); local_ppg (ear
+ *    posture seen) runs PPG + DSP with no host, so the optical wear
+ *    detector can confirm it. local_ppg IS the wear check, so
+ *    wear_paused does not suppress it.
  */
 #pragma once
 #include <stdint.h>
@@ -42,6 +47,8 @@ typedef struct {
     bool gate_en;            /* knob gate_en                       */
     bool wear_paused;        /* wear detector says off-ear         */
     bool usb_stream_ok;      /* !(USB present && stream_on_usb==0) */
+    bool standby_watch;      /* standby: accel on for ear posture  */
+    bool local_ppg;          /* standby + ear posture: sense locally */
 } nc_acq_in_t;
 
 typedef struct {

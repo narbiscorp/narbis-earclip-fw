@@ -43,6 +43,7 @@
 #include "acq_internal.h"
 
 #include "narbis/nc_gate.h"
+#include "narbis/nc_posture.h"
 #include "narbis/nc_proto_encode.h"
 
 static const char *TAG = "acq_imu";
@@ -61,6 +62,10 @@ _Atomic uint32_t g_acq_acc_energy;
 
 /* imu_task-only once running (see header comment). */
 static nc_gate_acc_t s_gate_acc;
+static nc_posture_t s_posture;
+
+/* imu -> sys: debounced ear posture (nc_posture.h), false when stopped. */
+static _Atomic bool s_ear_posture;
 
 /* s_imu_mtx-guarded block. */
 static SemaphoreHandle_t s_imu_mtx;
@@ -180,12 +185,16 @@ void acq_imu_task_run(void *arg)
 
         /* Gate energy + tee run unconditionally (internal consumers are
          * not maskable by the BLE stream knob). */
+        const uint16_t odr_hz = nc_acc_odr_hz(s_odr);
         for (size_t i = 0; i < n; i++) {
             uint32_t e = nc_gate_accel_feed(&s_gate_acc, buf[i].x,
                                             buf[i].y, buf[i].z);
             atomic_store(&g_acq_acc_energy, e);
+            (void)nc_posture_feed(&s_posture, buf[i].x, buf[i].y, buf[i].z,
+                                  odr_hz);
             (void)xQueueSend(imu_queue, &buf[i], 0);   /* tee, best-effort */
         }
+        atomic_store(&s_ear_posture, nc_posture_is_ear(&s_posture));
 
         xSemaphoreTake(s_imu_mtx, portMAX_DELAY);
 
@@ -249,6 +258,8 @@ esp_err_t acq_accel_start(void)
      * Safe: imu_task ignores everything while s_acc_running is false. */
     nc_gate_acc_init(&s_gate_acc, nc_acc_odr_hz(odr));
     atomic_store(&g_acq_acc_energy, 0);
+    nc_posture_init(&s_posture);
+    atomic_store(&s_ear_posture, false);
 
     xSemaphoreTake(s_imu_mtx, portMAX_DELAY);
     s_odr = odr;
@@ -288,6 +299,7 @@ esp_err_t acq_accel_stop(void)
     /* A stopped accelerometer must read as "no motion", not "last
      * motion forever" — the gate compares this against gate_acc_thr. */
     atomic_store(&g_acq_acc_energy, 0);
+    atomic_store(&s_ear_posture, false);
 
     ESP_LOGI(TAG, "accel stop");
     return err;
@@ -296,4 +308,9 @@ esp_err_t acq_accel_stop(void)
 bool acq_accel_running(void)
 {
     return atomic_load(&s_acc_running);
+}
+
+bool acq_ear_posture(void)
+{
+    return atomic_load(&s_ear_posture);
 }

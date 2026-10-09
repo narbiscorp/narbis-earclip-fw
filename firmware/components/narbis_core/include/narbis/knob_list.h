@@ -31,6 +31,11 @@ X(VBATT_WARN_MV,       0x0004, "vbatt_warn_mv",         NC_KNOB_U16,   3200,   4
 X(VBATT_STOP_MV,       0x0005, "vbatt_stop_mv",         NC_KNOB_U16,   3100,   3900,   3400, "mV",    KPL) \
 X(VBATT_OFF_MV,        0x0006, "vbatt_off_mv",          NC_KNOB_U16,   3000,   3800,   3300, "mV",    KPL) \
 X(STREAM_ON_USB,       0x0007, "stream_on_usb",         NC_KNOB_BOOL,     0,      1,      1, "",      KPL) \
+/*   standby (no central, no stream): on battery and not worn this long -> OFF     */ \
+/*   (0 = never). Worn = ear posture (accel) confirmed by the optical detector.    */ \
+X(STANDBY_OFF_S,       0x0008, "standby_off_s",         NC_KNOB_U16,      0,   3600,    120, "s",     KPL) \
+/*   standby indicator: one smooth breath (dark -> bright -> dark) per period      */ \
+X(IND_BREATH_MS,       0x0009, "ind_breath_ms",         NC_KNOB_U16,    600,   5000,   1500, "ms",    KPL) \
 /* -- button (0x01xx) --------------------------------------------------------------- */ \
 X(PRESS_LONG_MS,       0x0101, "press_long_ms",         NC_KNOB_U16,    500,   5000,   1500, "ms",    KPL) \
 X(PRESS_DOUBLE_MS,     0x0102, "press_double_ms",       NC_KNOB_U16,    200,   1000,    400, "ms",    KPL) \
@@ -100,6 +105,12 @@ X(GATE_RELEASE_MS,     0x0707, "gate_release_ms",       NC_KNOB_U16,      0,   5
 X(ACC_ODR,             0x0801, "acc_odr",               NC_KNOB_U8,       0,      5,      2, "code",  KPS) \
 X(ACC_FS,              0x0802, "acc_fs",                NC_KNOB_U8,       0,      3,      1, "code",  KPS) \
 X(ACC_STREAM_EN,       0x0803, "acc_stream_en",         NC_KNOB_BOOL,     0,      1,      1, "",      KPL) \
+/*   ear posture (nc_posture.h): the clip hangs from the lobe with gravity along   */ \
+/*   ear_axis (0 +x, 1 -x, 2 +y, 3 -y, 4 +z, 5 -z; V2.1 worn: -x), within the cone  */ \
+/*   cos >= ear_cos_pct %, held ear_hold_ms (both ways).                             */ \
+X(EAR_AXIS,            0x0804, "ear_axis",              NC_KNOB_U8,       0,      5,      1, "code",  KPL) \
+X(EAR_COS_PCT,         0x0805, "ear_cos_pct",           NC_KNOB_U8,      50,     99,     75, "%",     KPL) \
+X(EAR_HOLD_MS,         0x0806, "ear_hold_ms",           NC_KNOB_U16,    200,  10000,   2000, "ms",    KPL) \
 /* -- wear detection (0x09xx) ------------------------------------------------------- */ \
 /*   DC thresholds are on the ambient-subtracted IR DC. V2.1 earlobe, AGC locked:   */ \
 /*   ~565k; empty clip in air ~35k; empty clip on a table: raw IR at the rail.      */ \

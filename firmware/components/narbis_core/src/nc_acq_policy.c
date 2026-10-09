@@ -32,7 +32,8 @@ void nc_acq_eval(const nc_acq_in_t *in, nc_acq_out_t *out)
 
     /* wear_paused suppresses the AFE but not the gate/motion-wake
      * accel coupling (accel must keep running off-ear to re-wake) */
-    out->ppg_on   = ppg_demand && !in->wear_paused;
-    out->accel_on = acc_explicit || (in->gate_en && ppg_demand);
+    out->ppg_on   = (ppg_demand && !in->wear_paused) || in->local_ppg;
+    out->accel_on = acc_explicit || (in->gate_en && ppg_demand) ||
+                    in->standby_watch;
     out->dsp_on   = out->ppg_on;
 }

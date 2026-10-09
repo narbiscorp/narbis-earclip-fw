@@ -399,8 +399,9 @@ def test_knob_discover_chunk_roundtrip():
     chunk = golden_knob_disc_chunk0()
     # knob_list.h: 62 knobs; records 0..5 (225 bytes) fit the 244 budget.
     # +7 AGC lock knobs (0x040D..0x0413), +2 off-ear hold / probe
-    # (0x0414..0x0415), +4 wear fast-off knobs (0x0905..0x0908)
-    assert chunk.total == 75
+    # (0x0414..0x0415), +4 wear fast-off knobs (0x0905..0x0908),
+    # +2 standby (0x0008..0x0009), +3 ear posture (0x0804..0x0806)
+    assert chunk.total == 80
     assert len(chunk.records) == 6
     wire = P.build_knob_discover_chunk(chunk)
     assert len(wire) == 225 <= P.ATT_PAYLOAD_MAX

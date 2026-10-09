@@ -16,6 +16,7 @@ idf_component_register(
         src/nc_gate.c
         src/nc_ibi.c
         src/nc_knobs.c
+        src/nc_posture.c
         src/nc_timesync.c
         src/nc_wear.c
         src/proto_encode.c

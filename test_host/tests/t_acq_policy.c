@@ -188,6 +188,26 @@ static void test_full_combo(void)
     CHECK(o.ppg_on && o.accel_on && o.dsp_on);
 }
 
+/* Standby (v0.3.0-29): watching runs only the accel; ear posture adds
+ * local PPG, which the wear pause cannot veto (it IS the wear check);
+ * the USB block still wins. */
+static void test_standby_watch_and_local_ppg(void)
+{
+    nc_acq_in_t in = base();
+    in.standby_watch = true;
+    nc_acq_out_t o = ev(in);
+    CHECK(o.accel_on && !o.ppg_on);
+
+    in.local_ppg = true;
+    in.wear_paused = true;
+    o = ev(in);
+    CHECK(o.accel_on && o.ppg_on && o.dsp_on);
+
+    in.usb_stream_ok = false;
+    o = ev(in);
+    CHECK(!o.ppg_on && !o.accel_on);
+}
+
 int main(void)
 {
     TST_RUN(test_idle_nothing_runs);
@@ -200,5 +220,6 @@ int main(void)
     TST_RUN(test_wear_pause);
     TST_RUN(test_usb_block_forces_all_off);
     TST_RUN(test_full_combo);
+    TST_RUN(test_standby_watch_and_local_ppg);
     TST_REPORT();
 }

@@ -17,6 +17,9 @@ esp_err_t acq_accel_start(void);
 esp_err_t acq_accel_stop(void);
 bool acq_ppg_running(void);
 bool acq_accel_running(void);
+/* Debounced "hanging from an earlobe" (nc_posture.h); false whenever the
+ * accelerometer is stopped. */
+bool acq_ear_posture(void);
 
 /* Measured mean sample period (EMA over inter-frame deltas) in us —
  * the truth the IBI math uses; internal osc is only +-1%. */

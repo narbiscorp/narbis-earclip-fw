@@ -103,6 +103,17 @@ static int64_t s_warn_since = -1, s_stop_since = -1, s_off_since = -1;
 static int64_t s_last_activity_us;
 static int64_t s_offear_since = -1;   /* off-ear auto-sleep countdown   */
 
+#if NARBIS_TEST_MODE
+/* Standby (v0.3.0-29, user spec): nobody connected. The accelerometer
+ * watches for ear posture (nc_posture.h); posture starts LOCAL sensing so
+ * the optical wear detector can confirm it — and the indicator then hands
+ * the LEDs to the AGC, so the breathing stops and they run at the sensing
+ * level. On battery, standby_off_s without a confirmed wearer -> OFF. */
+static int64_t s_standby_since;       /* last instant standby was "worn" */
+
+static bool standby_active(void);
+#endif
+
 /* Wear re-probe: while off-ear with live PPG demand, periodically lift
  * the wear veto so the sample-clocked detector can see re-wear (it
  * needs PPG frames — a hard pause would be a one-way trap). 5 s probe
@@ -283,11 +294,21 @@ static void conn_sync(bool up)
 /* ------------------------------------------------------------------ */
 /* Demand evaluation                                                   */
 /* ------------------------------------------------------------------ */
+#if NARBIS_TEST_MODE
+static bool standby_active(void)
+{
+    return !s_connected && !s_boot_lowbatt &&
+           s_state != NC_STATE_OTA && s_state != NC_STATE_SELFTEST;
+}
+#endif
+
 static void demand(void)
 {
     s_in.gate_en = nc_knob_get(KNOB_GATE_EN) != 0;
 #if NARBIS_TEST_MODE
     s_in.wear_paused = false;        /* test builds never wear-gate */
+    s_in.standby_watch = standby_active();
+    s_in.local_ppg = s_in.standby_watch && acq_ear_posture();
 #else
     s_in.wear_paused = !s_worn && !s_wear_probe;
 #endif
@@ -990,6 +1011,21 @@ static void handle_tick(void)
             (int64_t)nc_knob_get(KNOB_OFFEAR_SLEEP_S) * 1000000;
         if (now - s_offear_since >= offear_us) {
             ESP_LOGI(TAG, "off-ear timeout — OFF");
+            orderly_off(false);
+        }
+    }
+#else
+    /* Standby auto-off (TEST builds; production keeps the policies
+     * above). Worn = local sensing up AND the optical detector agrees;
+     * USB present never counts down (charging / flashing / console). */
+    {
+        const uint32_t off_s = (uint32_t)nc_knob_get(KNOB_STANDBY_OFF_S);
+        const bool worn_now = acq_ppg_running() && s_worn;
+        if (!standby_active() || s_vusb || off_s == 0 || worn_now) {
+            s_standby_since = now;
+        } else if (now - s_standby_since >= (int64_t)off_s * 1000000) {
+            ESP_LOGI(TAG, "standby: not worn for %u s on battery — OFF",
+                     (unsigned)off_s);
             orderly_off(false);
         }
     }
