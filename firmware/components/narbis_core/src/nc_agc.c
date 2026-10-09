@@ -440,8 +440,8 @@ int nc_agc_evaluate(nc_agc_t *s, const nc_agc_in_t *in, nc_agc_act_t out[4])
         s->offear_run = false;
     }
     const uint64_t hold_ms = (uint64_t)nc_knob_get(KNOB_AGC_OFFEAR_HOLD_S) * 1000u;
-    if (lock_mode && s->locked_this_stream && s->offear_run &&
-        in->now_ms - s->offear_since_ms < hold_ms) {
+    const bool hold_over = s->offear_run && in->now_ms - s->offear_since_ms >= hold_ms;
+    if (lock_mode && s->locked_this_stream && s->offear_run && !hold_over) {
         s->sat_run = false;
         s->drift_run = false;
         return 0;
@@ -453,8 +453,9 @@ int nc_agc_evaluate(nc_agc_t *s, const nc_agc_in_t *in, nc_agc_act_t out[4])
 
     const uint32_t hold = (uint32_t)nc_knob_get(KNOB_AGC_HOLD_MS);
     const bool ran = !s->stepped_once || (in->now_ms - s->last_step_ms) >= hold;
-    /* PROBE (nc_agc.h): off-ear before this stream's first lock. */
-    const bool probe = lock_mode && in->off_ear && !s->locked_this_stream;
+    /* PROBE (nc_agc.h): off-ear before this stream's first lock, or once
+     * the off-ear hold is over. Never the full ladder on an empty clip. */
+    const bool probe = lock_mode && in->off_ear && (!s->locked_this_stream || hold_over);
     int n = 0;
     if (ran) {
         n = s->restore_phase ? restore(s, in, &b, out)

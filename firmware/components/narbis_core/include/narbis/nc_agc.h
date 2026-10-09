@@ -60,16 +60,22 @@
  *   - HOLD:    once this stream has locked, while the caller says
  *              off_ear nothing is evaluated — no ladder, no SAT/DRIFT
  *              runs — for at most agc_offear_hold_s (0 = never hold).
- *              The bound keeps a wrong "off" verdict (a worn clip driven
- *              to the rail) from freezing the gain for good.
+ *              After that the usual SAT / DRIFT rules re-acquire, but
+ *              off-ear that means PROBE, never the full ladder (third
+ *              on-ear run: the hold ran out on the table, the full ladder
+ *              walked the offdac down chasing the empty clip, and the ear
+ *              that went back on mid-walk read "dark" and was not seen).
+ *              The LED-only probe still rescues a worn clip that slipped
+ *              to the rail.
  *   - RESTORE: every lock while worn records LED / gain / offdac. A
  *              re-acquire with reason WEAR then first sets them back (gain
  *              + LEDs, then the offdacs one hold window later) and only
  *              then lets the ladder run. The record survives
  *              nc_agc_restart (a new stream): the same wearer's settings
  *              beat a climb from the minimum. nc_agc_init clears it.
- *   - PROBE:   before the first lock of a stream, while off_ear, the
- *              ladder may only move the LEDs, never above
+ *   - PROBE:   while off_ear before the first lock of a stream, or after
+ *              the HOLD ran out, the ladder may only move the LEDs, never
+ *              above
  *              agc_probe_max_ma, and nothing locks. An empty clip
  *              otherwise walks the offdac and gain all the way down
  *              chasing its own saturation (or the LEDs up to max chasing

@@ -822,6 +822,19 @@ static void test_offear_hold_keeps_lock(void)
     CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);
     CHECK_EQ(s.reason, NC_AGC_RSN_SAT);
 
+    /* ... but still off-ear, so it PROBES (third on-ear run): LEDs only,
+     * however long the empty clip lies there; nothing locks. */
+    p.k[0] = p.k[1] = 1000000;                        /* rail even at min */
+    for (int i = 0; i < 240; i++) {
+        int n = drive_dt(&s, &p, acts, 500);
+        for (int k = 0; k < n; k++) CHECK(acts[k].kind == NC_AGC_LED);
+    }
+    CHECK_EQ(p.led[0], 2);
+    CHECK_EQ(p.od[0], 0);
+    CHECK_EQ(p.od[1], 0);
+    CHECK_EQ(p.rf, 2);
+    CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);
+
     /* agc_offear_hold_s = 0 disables the hold: plain SAT timing. */
     nc_knobs_init();
     CHECK_EQ(nc_knob_set_id(0x0414, 0), NC_ST_OK);
@@ -988,9 +1001,10 @@ static void test_probe_saturated_empty_clip(void)
     CHECK_EQ(p.rf, 2);
 }
 
-/* A lock reached while off-ear (after the hold expired) is not a
- * wearer's: the put-back restore keeps the last WORN lock. */
-static void test_offear_lock_is_not_recorded(void)
+/* Off the ear past the hold: the probe settles the empty clip in band but
+ * never locks there, so the put-back restore still has the last WORN
+ * lock to go back to. */
+static void test_offear_never_locks_restore_keeps_worn_lock(void)
 {
     nc_knobs_init();
     nc_agc_t s;
@@ -999,17 +1013,16 @@ static void test_offear_lock_is_not_recorded(void)
     plant_t p = converged_plant();
     lock_stable(&s, &p);                              /* worn: led 5/4 */
 
-    /* Off the ear long enough for the hold to expire and SAT to fire,
-     * then the empty clip settles in band and locks while off-ear. */
     p.now = 60000;
     p.off_ear = true;
-    p.k[0] = 450000;
+    p.k[0] = 450000;                                  /* rails at 5 mA */
     for (int i = 0; i < 200 && s.state != NC_AGC_ST_ACQUIRE; i++) drive_dt(&s, &p, acts, 500);
     CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);
     CHECK_EQ(s.reason, NC_AGC_RSN_SAT);
-    for (int i = 0; i < 60 && s.state != NC_AGC_ST_LOCKED; i++) drive(&s, &p, acts);
-    CHECK_EQ(s.state, NC_AGC_ST_LOCKED);
-    CHECK(p.led[0] != 5);                             /* different settings */
+    for (int i = 0; i < 60; i++) drive(&s, &p, acts);  /* settles at 3 mA */
+    CHECK(in_band(&p, 0));
+    CHECK(p.led[0] != 5);
+    CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);             /* in band, still no lock */
 
     p.off_ear = false;
     p.led[0] = p.led[1] = 2;
@@ -1049,6 +1062,6 @@ int main(void)
     TST_RUN(test_putback_restores_lock_settings);
     TST_RUN(test_probe_caps_leds_off_ear);
     TST_RUN(test_probe_saturated_empty_clip);
-    TST_RUN(test_offear_lock_is_not_recorded);
+    TST_RUN(test_offear_never_locks_restore_keeps_worn_lock);
     TST_REPORT();
 }
