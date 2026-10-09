@@ -1,6 +1,7 @@
 /*
  * nc_agc.c — AGC policy engine. Pure C11; knobs via nc_knob_get only.
- * Policy is locked — see nc_agc.h for the ladder specification.
+ * Policy is locked — see nc_agc.h for the ladder specification and the
+ * acquire -> lock state machine wrapped around it.
  */
 #include "narbis/nc_agc.h"
 #include "narbis/nc_knobs.h"
@@ -8,6 +9,10 @@
 /* Ascending gain-value order of the AFE4404 TIA_GAIN RF codes
  * (SBAS689: 0=500k 1=250k 2=100k 3=50k 4=25k 5=10k 6=1M 7=2M). */
 static const uint8_t rf_value_order[8] = { 5, 4, 3, 2, 1, 0, 6, 7 };
+
+/* IBI flags that disqualify a beat from counting toward a lock. */
+#define AGC_UNCLEAN_IBIF (NC_IBIF_GATED_CTX | NC_IBIF_AGC_SETTLING | \
+                          NC_IBIF_INTERPOLATED | NC_IBIF_FIRST_AFTER_GAP)
 
 int nc_agc_rf_rank(uint8_t rf_code)
 {
@@ -24,11 +29,83 @@ uint8_t nc_agc_rf_code_at(int rank)
     return rf_value_order[rank];
 }
 
+/* ------------------------------------------------------------------ */
+/* State transitions                                                   */
+/* ------------------------------------------------------------------ */
+static void enter(nc_agc_t *s, uint8_t state, uint8_t reason)
+{
+    s->state = state;
+    s->reason = reason;
+    s->changed = true;
+    s->clean_beats = 0;
+    s->quiet = false;
+    s->sat_run = false;
+    s->drift_run = false;
+}
+
+static void to_acquire(nc_agc_t *s, uint8_t reason)
+{
+    if (s->state == NC_AGC_ST_LOCKED && s->reacq_count < 255) {
+        s->reacq_count++;
+    }
+    enter(s, NC_AGC_ST_ACQUIRE, reason);
+}
+
+static void to_locked(nc_agc_t *s, uint8_t reason, uint64_t now_ms)
+{
+    enter(s, NC_AGC_ST_LOCKED, reason);
+    s->locked_ms = now_ms;
+}
+
 void nc_agc_init(nc_agc_t *s)
 {
     s->last_step_ms = 0;
     s->stepped_once = false;
+    s->reacq_count = 0;
+    s->beat_seen = false;
+    s->last_beat_ms = 0;
+    s->quiet_since_ms = s->sat_since_ms = s->drift_since_ms = 0;
+    s->locked_ms = 0;
+    enter(s, NC_AGC_ST_ACQUIRE, NC_AGC_RSN_START);
 }
+
+void nc_agc_on_beat(nc_agc_t *s, uint16_t ibi_ms, uint8_t ibi_flags,
+                    uint64_t now_ms)
+{
+    if (ibi_ms > 0 && (ibi_flags & AGC_UNCLEAN_IBIF) == 0) {
+        if (s->clean_beats < 255) s->clean_beats++;
+        s->last_beat_ms = now_ms;
+        s->beat_seen = true;
+    } else {
+        s->clean_beats = 0;
+    }
+}
+
+void nc_agc_reacquire(nc_agc_t *s, uint8_t reason)
+{
+    if (s->state == NC_AGC_ST_LOCKED) {
+        to_acquire(s, reason);
+    } else if (s->state == NC_AGC_ST_ACQUIRE) {
+        s->clean_beats = 0;          /* fresh start, no edge */
+        s->quiet = false;
+    }
+    /* OFF: frozen or disabled wins; the unfreeze re-acquires. */
+}
+
+bool nc_agc_take_change(nc_agc_t *s)
+{
+    bool c = s->changed;
+    s->changed = false;
+    return c;
+}
+
+/* ------------------------------------------------------------------ */
+/* The ladder (unchanged policy; see nc_agc.h)                         */
+/* ------------------------------------------------------------------ */
+typedef struct {
+    int32_t lo, hi;              /* target ± deadband                 */
+    int32_t lock_lo, lock_hi;    /* target ± agc_lock_band_pct         */
+} agc_band_t;
 
 static int emit(nc_agc_act_t *out, int n, nc_agc_kind_t kind,
                 uint8_t chan, uint8_t led_ma, int8_t offdac, uint8_t rf)
@@ -41,21 +118,11 @@ static int emit(nc_agc_act_t *out, int n, nc_agc_kind_t kind,
     return n + 1;
 }
 
-int nc_agc_evaluate(nc_agc_t *s, const nc_agc_in_t *in, nc_agc_act_t out[4])
+static int ladder(nc_agc_t *s, const nc_agc_in_t *in, const agc_band_t *b,
+                  nc_agc_act_t out[4])
 {
-    if (nc_knob_get(KNOB_AGC_EN) == 0 || in->frozen) return 0;
-
-    const uint32_t hold = (uint32_t)nc_knob_get(KNOB_AGC_HOLD_MS);
-    if (s->stepped_once && (in->now_ms - s->last_step_ms) < hold) return 0;
-
-    /* Band edges in counts. pct knobs are <= 100, so the products stay
-     * far below 2^31 even at full scale; int64 keeps it obviously safe. */
-    const int32_t target = (int32_t)(((int64_t)NC_AGC_FS_COUNTS *
-                                      nc_knob_get(KNOB_AGC_TARGET_PCT)) / 100);
-    const int32_t dead = (int32_t)(((int64_t)NC_AGC_FS_COUNTS *
-                                    nc_knob_get(KNOB_AGC_DEADBAND_PCT)) / 100);
-    const int32_t lo = target - dead;
-    const int32_t hi = target + dead;
+    const int32_t lo = b->lo;
+    const int32_t hi = b->hi;
     const int32_t step = nc_knob_get(KNOB_AGC_STEP_MA);
     const bool od_en = nc_knob_get(KNOB_AGC_OFFDAC_EN) != 0;
 
@@ -141,6 +208,147 @@ int nc_agc_evaluate(nc_agc_t *s, const nc_agc_in_t *in, nc_agc_act_t out[4])
     if (n > 0) {
         s->last_step_ms = in->now_ms;
         s->stepped_once = true;
+    }
+    return n;
+}
+
+/* ------------------------------------------------------------------ */
+/* Acquire -> lock                                                     */
+/* ------------------------------------------------------------------ */
+static bool both_within(const nc_agc_in_t *in, int32_t lo, int32_t hi)
+{
+    for (int c = 0; c < 2; c++) {
+        if (in->sat[c] || in->dc_raw[c] < lo || in->dc_raw[c] > hi) return false;
+    }
+    return true;
+}
+
+/* LOCKED: track the clipping / drift runs and decide whether the signal
+ * has been unusable long enough to be worth a step. */
+static bool locked_wants_reacquire(nc_agc_t *s, const nc_agc_in_t *in,
+                                   const agc_band_t *b)
+{
+    const uint64_t now = in->now_ms;
+
+    if (in->sat[0] || in->sat[1]) {
+        if (!s->sat_run) {
+            s->sat_run = true;
+            s->sat_since_ms = now;
+        }
+    } else {
+        s->sat_run = false;
+    }
+
+    bool out_of_band = false;
+    for (int c = 0; c < 2; c++) {
+        if (!in->sat[c] &&
+            (in->dc_raw[c] < b->lock_lo || in->dc_raw[c] > b->lock_hi)) {
+            out_of_band = true;
+        }
+    }
+    if (out_of_band) {
+        if (!s->drift_run) {
+            s->drift_run = true;
+            s->drift_since_ms = now;
+        }
+    } else {
+        s->drift_run = false;
+    }
+
+    const uint64_t min_ms = (uint64_t)nc_knob_get(KNOB_AGC_REACQ_MIN_S) * 1000u;
+    if (now - s->locked_ms < min_ms) {
+        return false;
+    }
+    if (s->sat_run &&
+        now - s->sat_since_ms >= (uint64_t)nc_knob_get(KNOB_AGC_REACQ_SAT_MS)) {
+        to_acquire(s, NC_AGC_RSN_SAT);
+        return true;
+    }
+    const uint64_t drift_ms = (uint64_t)nc_knob_get(KNOB_AGC_REACQ_DRIFT_MS);
+    if (s->drift_run && now - s->drift_since_ms >= drift_ms) {
+        /* Beats still arriving means the signal is doing its job: a
+         * level outside the band is not worth a step while it does. */
+        const bool beating = s->beat_seen && now - s->last_beat_ms < drift_ms;
+        if (!beating) {
+            to_acquire(s, NC_AGC_RSN_DRIFT);
+            return true;
+        }
+    }
+    return false;
+}
+
+/* ACQUIRE: after this evaluation's ladder decision, decide whether the
+ * level is good enough to stop touching it. `ran` is false when the
+ * hold window kept the ladder from looking at all. */
+static void acquire_progress(nc_agc_t *s, const nc_agc_in_t *in,
+                             const agc_band_t *b, int n, bool ran)
+{
+    if (n > 0) {
+        s->clean_beats = 0;          /* plant changed: start counting again */
+        s->quiet = false;
+        return;
+    }
+    if (s->clean_beats >= (uint8_t)nc_knob_get(KNOB_AGC_LOCK_BEATS) &&
+        both_within(in, b->lock_lo, b->lock_hi)) {
+        to_locked(s, NC_AGC_RSN_BEATS, in->now_ms);
+        return;
+    }
+    if (!ran) {
+        return;
+    }
+    if (both_within(in, b->lo, b->hi)) {
+        if (!s->quiet) {
+            s->quiet = true;
+            s->quiet_since_ms = in->now_ms;
+        } else if (in->now_ms - s->quiet_since_ms >=
+                   (uint64_t)nc_knob_get(KNOB_AGC_LOCK_STABLE_MS)) {
+            to_locked(s, NC_AGC_RSN_STABLE, in->now_ms);
+        }
+    } else {
+        s->quiet = false;
+    }
+}
+
+int nc_agc_evaluate(nc_agc_t *s, const nc_agc_in_t *in, nc_agc_act_t out[4])
+{
+    if (nc_knob_get(KNOB_AGC_EN) == 0 || in->frozen) {
+        if (s->state != NC_AGC_ST_OFF) {
+            enter(s, NC_AGC_ST_OFF, NC_AGC_RSN_MANUAL);
+        }
+        return 0;
+    }
+    if (s->state == NC_AGC_ST_OFF) {
+        to_acquire(s, NC_AGC_RSN_MANUAL);   /* unfrozen / re-enabled */
+    }
+
+    const bool lock_mode = nc_knob_get(KNOB_AGC_MODE) != 0;
+    if (!lock_mode && s->state == NC_AGC_ST_LOCKED) {
+        to_acquire(s, NC_AGC_RSN_MODE);     /* legacy ladder resumes */
+    }
+
+    /* Band edges in counts. pct knobs are <= 100, so the products stay
+     * far below 2^31 even at full scale; int64 keeps it obviously safe. */
+    const int32_t target = (int32_t)(((int64_t)NC_AGC_FS_COUNTS *
+                                      nc_knob_get(KNOB_AGC_TARGET_PCT)) / 100);
+    const int32_t dead = (int32_t)(((int64_t)NC_AGC_FS_COUNTS *
+                                    nc_knob_get(KNOB_AGC_DEADBAND_PCT)) / 100);
+    const int32_t lock = (int32_t)(((int64_t)NC_AGC_FS_COUNTS *
+                                    nc_knob_get(KNOB_AGC_LOCK_BAND_PCT)) / 100);
+    const agc_band_t b = {
+        .lo = target - dead, .hi = target + dead,
+        .lock_lo = target - lock, .lock_hi = target + lock,
+    };
+
+    if (s->state == NC_AGC_ST_LOCKED && !locked_wants_reacquire(s, in, &b)) {
+        return 0;                           /* locked: nothing moves */
+    }
+
+    const uint32_t hold = (uint32_t)nc_knob_get(KNOB_AGC_HOLD_MS);
+    const bool ran = !s->stepped_once || (in->now_ms - s->last_step_ms) >= hold;
+    const int n = ran ? ladder(s, in, &b, out) : 0;
+
+    if (lock_mode && s->state == NC_AGC_ST_ACQUIRE) {
+        acquire_progress(s, in, &b, n, ran);
     }
     return n;
 }

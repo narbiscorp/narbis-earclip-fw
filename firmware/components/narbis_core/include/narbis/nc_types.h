@@ -85,8 +85,31 @@ typedef enum {
     NC_EV_ERROR = 0x05,      /* data: code lo/hi, arg (4B LE)             */
     NC_EV_RATE_CHANGE = 0x06,/* data: old_code, new_code                  */
     NC_EV_AGC_OFFDAC = 0x07, /* data: phase, old_code, new_code           */
-    NC_EV_SELFTEST_DONE = 0x08 /* data: pass_count, fail_count            */
+    NC_EV_SELFTEST_DONE = 0x08,/* data: pass_count, fail_count            */
+    NC_EV_AGC_STATE = 0x09   /* data: state, reason, reacq_count (1.2)    */
 } nc_event_type_t;
+
+/* AGC acquire -> lock state (NC_EV_AGC_STATE payload + STATUS.agc_state).
+ * OFF covers "not adjusting for an outside reason": stream stopped,
+ * agc_en = 0, or frozen by NC_OP_AGC_FREEZE. */
+typedef enum {
+    NC_AGC_ST_OFF = 0,
+    NC_AGC_ST_ACQUIRE = 1,   /* ladder running toward the target band   */
+    NC_AGC_ST_LOCKED = 2     /* no actuation; raw signal is step-free   */
+} nc_agc_state_t;
+
+/* Why the AGC entered its current state (NC_EV_AGC_STATE payload). */
+typedef enum {
+    NC_AGC_RSN_START = 0,    /* acquisition (re)started: stream start   */
+    NC_AGC_RSN_BEATS = 1,    /* locked: agc_lock_beats clean beats      */
+    NC_AGC_RSN_STABLE = 2,   /* locked: in band, idle agc_lock_stable_ms */
+    NC_AGC_RSN_SAT = 3,      /* re-acquire: clipping agc_reacq_sat_ms   */
+    NC_AGC_RSN_DRIFT = 4,    /* re-acquire: DC left the lock band and no
+                                clean beats for agc_reacq_drift_ms      */
+    NC_AGC_RSN_WEAR = 5,     /* re-acquire: put on (wear-on edge)       */
+    NC_AGC_RSN_MANUAL = 6,   /* re-acquire: unfrozen by the host        */
+    NC_AGC_RSN_MODE = 7      /* agc_mode switched to continuous         */
+} nc_agc_reason_t;
 
 /* Gate reason mask bits (NC_EV_GATE payload + gate module output) */
 #define NC_GATE_REASON_ACCEL     (1u << 0)

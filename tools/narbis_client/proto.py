@@ -28,7 +28,8 @@ from typing import List, Optional, Tuple, Union
 # ------------------------------------------------------------------ #
 
 PROTO_VER_MAJOR = 1
-PROTO_VER_MINOR = 1  # 1.1: +TEST_LED_SWEEP_CONT, STATUS btn_pressed
+PROTO_VER_MINOR = 2  # 1.1: +TEST_LED_SWEEP_CONT, STATUS btn_pressed
+#                      1.2: +EV_AGC_STATE, STATUS agc_state/agc_reacq_count
 PROTO_VER = (PROTO_VER_MAJOR << 8) | PROTO_VER_MINOR
 
 # ATT payload budget at MTU 247
@@ -281,6 +282,7 @@ EV_ERROR = 0x05
 EV_RATE_CHANGE = 0x06
 EV_AGC_OFFDAC = 0x07
 EV_SELFTEST_DONE = 0x08
+EV_AGC_STATE = 0x09        # proto 1.2
 
 # wire payload lengths (t_us included)
 EVLEN_AGC_STEP = 13
@@ -291,6 +293,22 @@ EVLEN_ERROR = 14
 EVLEN_RATE_CHANGE = 10
 EVLEN_AGC_OFFDAC = 11
 EVLEN_SELFTEST_DONE = 10
+EVLEN_AGC_STATE = 11
+
+# nc_agc_state_t (EV_AGC_STATE payload + STATUS.agc_state)
+AGC_ST_OFF = 0       # not adjusting: stream stopped, agc_en 0, or frozen
+AGC_ST_ACQUIRE = 1   # ladder running toward the target band
+AGC_ST_LOCKED = 2    # no actuation; raw signal is step-free
+
+# nc_agc_reason_t (EV_AGC_STATE payload)
+AGC_RSN_START = 0    # acquisition (re)started: stream start
+AGC_RSN_BEATS = 1    # locked: agc_lock_beats clean beats
+AGC_RSN_STABLE = 2   # locked: in band and idle for agc_lock_stable_ms
+AGC_RSN_SAT = 3      # re-acquire: clipping for agc_reacq_sat_ms
+AGC_RSN_DRIFT = 4    # re-acquire: out of the lock band, no clean beats
+AGC_RSN_WEAR = 5     # re-acquire: put on
+AGC_RSN_MANUAL = 6   # re-acquire: unfrozen by the host (OFF: frozen)
+AGC_RSN_MODE = 7     # agc_mode switched to continuous
 
 MARKER_SRC_BUTTON = 0
 MARKER_SRC_HOST = 1
@@ -384,6 +402,15 @@ class EvSelftestDone:
 
 
 @dataclass
+class EvAgcState:
+    t_us: int
+    state: int          # AGC_ST_*
+    reason: int         # AGC_RSN_*
+    reacq_count: int    # re-acquisitions since stream start (sat 255)
+    type: int = EV_AGC_STATE
+
+
+@dataclass
 class EvUnknown:
     """Record whose type (or length, for a known type) this proto version
     does not understand. payload is the full wire payload including the
@@ -394,7 +421,8 @@ class EvUnknown:
 
 
 Event = Union[EvAgcStep, EvGate, EvWear, EvMarker, EvError,
-              EvRateChange, EvAgcOffdac, EvSelftestDone, EvUnknown]
+              EvRateChange, EvAgcOffdac, EvSelftestDone, EvAgcState,
+              EvUnknown]
 
 _EVENT_HDR = struct.Struct("<IB")
 
@@ -408,6 +436,7 @@ _EVENT_CODECS = {
     EV_RATE_CHANGE: (EVLEN_RATE_CHANGE, "<BB", EvRateChange),
     EV_AGC_OFFDAC: (EVLEN_AGC_OFFDAC, "<BBB", EvAgcOffdac),
     EV_SELFTEST_DONE: (EVLEN_SELFTEST_DONE, "<BB", EvSelftestDone),
+    EV_AGC_STATE: (EVLEN_AGC_STATE, "<BBB", EvAgcState),
 }
 for _t, (_ln, _fmt, _cls) in _EVENT_CODECS.items():
     assert _ln == 8 + struct.calcsize(_fmt), _t
@@ -494,7 +523,7 @@ STF_LOWBATT_WARN = 1 << 7
 
 CLOCK_DRIFT_UNKNOWN = 0x7FFF  # clock_drift_ppm_x10 sentinel
 
-_STATUS = struct.Struct("<BBHBBBBBBHIHhIHBB4s")
+_STATUS = struct.Struct("<BBHBBBBBBHIHhIHBBBB2s")
 assert _STATUS.size == STATUS_SIZE
 
 
@@ -517,19 +546,21 @@ class Status:
     ibi_last_ms: int
     hr_bpm: int             # smoothed; 0 = none
     btn_pressed: int = 0    # live GPIO2 level (proto 1.1; was reserved[0])
-    reserved: bytes = b"\x00" * 4
+    agc_state: int = 0      # AGC_ST_* (proto 1.2; was reserved[1])
+    agc_reacq_count: int = 0  # re-acquisitions since stream start (1.2)
+    reserved: bytes = b"\x00" * 2
     extra: bytes = b""      # append-only tail from a newer firmware
 
 
 def build_status(s: Status) -> bytes:
-    if len(s.reserved) != 4:
-        raise ValueError("reserved must be 4 bytes")
+    if len(s.reserved) != 2:
+        raise ValueError("reserved must be 2 bytes")
     return _STATUS.pack(
         s.sys_state, s.flags, s.batt_mv, s.batt_pct, s.ppg_rate_code,
         s.led_ir_ma, s.led_red_ma, s.tia_gain_code, s.tia_cf_code,
         s.gate_duty_x100, s.notif_drop_count, s.i2c_err_count,
         s.clock_drift_ppm_x10, s.uptime_s, s.ibi_last_ms, s.hr_bpm,
-        s.btn_pressed, s.reserved) + s.extra
+        s.btn_pressed, s.agc_state, s.agc_reacq_count, s.reserved) + s.extra
 
 
 def parse_status(buf: bytes) -> Status:

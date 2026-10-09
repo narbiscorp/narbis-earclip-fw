@@ -276,6 +276,28 @@ static uint16_t med3(uint16_t a, uint16_t b, uint16_t c)
     return (a > b) ? a : b;
 }
 
+/* Post an acquire/lock transition to sys_task, the sole EVENT + STATUS
+ * owner. On a full sys_q the edge is re-armed so the next AGC tick
+ * retries — STATUS must not keep reporting a state the AGC has left. */
+static void agc_publish(void)
+{
+    if (!nc_agc_take_change(&s_agc)) {
+        return;
+    }
+    portENTER_CRITICAL(&s_agg_mux);        /* console `state` reads this */
+    s_agg.agc_state = s_agc.state;
+    s_agg.agc_reason = s_agc.reason;
+    s_agg.agc_reacq_count = s_agc.reacq_count;
+    portEXIT_CRITICAL(&s_agg_mux);
+    sys_msg_t m = { .type = SYS_AGC_STATE };
+    m.u.agc_state.state = s_agc.state;
+    m.u.agc_state.reason = s_agc.reason;
+    m.u.agc_state.reacq_count = s_agc.reacq_count;
+    if (!sys_post(&m)) {
+        s_agc.changed = true;
+    }
+}
+
 static void on_beat(const nc_ibi_rec_t *rec)
 {
     size_t len = nc_enc_ibi(s_ibi_pkt, s_ibi_seq, rec, 1);
@@ -283,6 +305,10 @@ static void on_beat(const nc_ibi_rec_t *rec)
         (void)ble_tx_submit(BLE_CH_IBI, s_ibi_pkt, (uint16_t)len);
         s_ibi_seq++;
     }
+
+    /* Every record, gap restarts included: clean beats lock the AGC,
+     * anything else breaks the run (nc_agc.h). */
+    nc_agc_on_beat(&s_agc, rec->ibi_ms, rec->flags, rec->t_beat_us / 1000u);
 
     if (rec->ibi_ms == 0) {
         /* FIRST_AFTER_GAP: valid timestamp, no interval — restart the
@@ -343,6 +369,7 @@ static void agc_tick(uint64_t t_us)
 
     nc_agc_act_t acts[4];
     int n = nc_agc_evaluate(&s_agc, &in, acts);
+    agc_publish();      /* lock / re-acquire / OFF decided by this tick */
     if (n <= 0) {
         return;
     }
@@ -376,6 +403,12 @@ static void one_hz_tick(void)
         s_wear_reported = true;
         sys_msg_t m = { .type = SYS_WEAR_CHANGED, .u.flag = worn };
         (void)sys_post(&m);   /* sys_task owns the EVENT + policy side */
+        if (worn) {
+            /* Put on: the optical path just changed completely, so the
+             * level a lock was holding no longer means anything. */
+            nc_agc_reacquire(&s_agc, NC_AGC_RSN_WEAR);
+            agc_publish();
+        }
     } else if (!s_wear_reported && !worn &&
                ++s_notworn_s >= (uint32_t)nc_knob_get(KNOB_WEAR_OFF_S)) {
         /* Never-worn handshake: sys_task boots with an optimistic

@@ -148,6 +148,14 @@ static int cmd_state(int argc, char **argv)
            ag.gate_duty_x100 / 100, ag.gate_duty_x100 % 100);
     printf("hr:       %u bpm (last IBI %u ms)\n", ag.hr_bpm, ag.ibi_last_ms);
     printf("dc ir/red: %" PRId32 " / %" PRId32 "\n", ag.dc_ir, ag.dc_red);
+    static const char *const agc_st[] = { "OFF", "ACQUIRE", "LOCKED" };
+    static const char *const agc_rsn[] = {
+        "start", "beats", "stable", "clipping", "drift", "worn", "host", "mode",
+    };
+    printf("agc:      %s (%s, re-acquired %u)\n",
+           acq_ppg_running() && ag.agc_state < 3 ? agc_st[ag.agc_state] : "OFF",
+           ag.agc_reason < 8 ? agc_rsn[ag.agc_reason] : "?",
+           (unsigned)ag.agc_reacq_count);
     printf("ota:      %s\n", ota_active() ? "ACTIVE" : "idle");
     return 0;
 }

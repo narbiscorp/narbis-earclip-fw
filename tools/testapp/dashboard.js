@@ -195,6 +195,12 @@ const NarbisDashCore = (() => {
         return s + `offDAC ph${rec.phase} ${rec.oldCode}→${rec.newCode}`;
       case P.EV_SELFTEST_DONE:
         return s + `selftest done ${rec.passCount} pass ${rec.failCount} fail`;
+      case P.EV_AGC_STATE: {
+        const st = ["OFF", "ACQUIRE", "LOCKED"][rec.state] || `state ${rec.state}`;
+        const why = ["start", "beats", "stable", "clipping", "drift", "worn",
+                     "host", "mode"][rec.reason] || `reason ${rec.reason}`;
+        return s + `AGC ${st} (${why}, re-acquired ${rec.reacqCount})`;
+      }
       default:
         return s + `event 0x${rec.type.toString(16)} (${rec.len}B)`;
     }

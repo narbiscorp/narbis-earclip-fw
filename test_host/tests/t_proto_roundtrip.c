@@ -298,6 +298,7 @@ static const ev_fix_t fix_events[] = {
     { NC_EV_RATE_CHANGE,   NC_EVLEN_RATE_CHANGE,   2, { 1, 4 } },
     { NC_EV_AGC_OFFDAC,    NC_EVLEN_AGC_OFFDAC,    3, { 2, 3, 7 } },
     { NC_EV_SELFTEST_DONE, NC_EVLEN_SELFTEST_DONE, 2, { 7, 1 } },
+    { NC_EV_AGC_STATE,     NC_EVLEN_AGC_STATE,     3, { 2, 1, 3 } },  /* LOCKED, BEATS, 3 */
 };
 #define N_EV_FIX (sizeof fix_events / sizeof fix_events[0])
 
@@ -375,6 +376,8 @@ static void test_status(void)
         .uptime_s = 3600,
         .ibi_last_ms = 812,
         .hr_bpm = 74,
+        .agc_state = 2,               /* LOCKED, proto 1.2 */
+        .agc_reacq_count = 3,
         .reserved = { 0 },
     };
 

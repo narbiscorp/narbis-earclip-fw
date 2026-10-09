@@ -57,5 +57,8 @@ typedef struct {
     bool worn;
     uint16_t ibi_last_ms;
     uint8_t hr_bpm;
+    uint8_t agc_state;         /* nc_agc_state_t, updated on each transition */
+    uint8_t agc_reason;        /* nc_agc_reason_t of that transition         */
+    uint8_t agc_reacq_count;
 } acq_aggregates_t;
 void acq_get_aggregates(acq_aggregates_t *out);

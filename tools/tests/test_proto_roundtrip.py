@@ -79,6 +79,8 @@ def golden_event_all():
         P.EvRateChange(t(5), old_code=1, new_code=4),
         P.EvAgcOffdac(t(6), phase=2, old_code=3, new_code=7),
         P.EvSelftestDone(t(7), pass_count=7, fail_count=1),
+        P.EvAgcState(t(8), state=P.AGC_ST_LOCKED, reason=P.AGC_RSN_BEATS,
+                     reacq_count=3),
     ])
 
 
@@ -89,7 +91,8 @@ def golden_status():
         batt_mv=3987, batt_pct=76, ppg_rate_code=1,
         led_ir_ma=12, led_red_ma=8, tia_gain_code=4, tia_cf_code=2,
         gate_duty_x100=123, notif_drop_count=42, i2c_err_count=7,
-        clock_drift_ppm_x10=-153, uptime_s=3600, ibi_last_ms=812, hr_bpm=74)
+        clock_drift_ppm_x10=-153, uptime_s=3600, ibi_last_ms=812, hr_bpm=74,
+        agc_state=P.AGC_ST_LOCKED, agc_reacq_count=3)
 
 
 # --- knob discovery chunk 0: derived from knob_list.h defaults ------- #
@@ -284,7 +287,8 @@ def test_event_roundtrip_all_types():
     expect = P.EVENT_HDR_SIZE + sum(
         2 + ln for ln in (P.EVLEN_AGC_STEP, P.EVLEN_GATE, P.EVLEN_WEAR,
                           P.EVLEN_MARKER, P.EVLEN_ERROR, P.EVLEN_RATE_CHANGE,
-                          P.EVLEN_AGC_OFFDAC, P.EVLEN_SELFTEST_DONE))
+                          P.EVLEN_AGC_OFFDAC, P.EVLEN_SELFTEST_DONE,
+                          P.EVLEN_AGC_STATE))
     assert len(wire) == expect
     assert P.parse_event_batch(wire) == batch
 
@@ -327,7 +331,7 @@ def test_status_golden_bytes_and_roundtrip():
     assert len(wire) == P.STATUS_SIZE
     assert wire == bytes.fromhex(
         "024d930f4c010c0804027b002a00000007006"
-        "7ff100e00002c034a0000000000")
+        "7ff100e00002c034a0002030000")  # ...hr 74, btn 0, agc LOCKED, reacq 3
     assert P.parse_status(wire) == s
 
 
@@ -394,7 +398,7 @@ def test_control_roundtrip_and_builders():
 def test_knob_discover_chunk_roundtrip():
     chunk = golden_knob_disc_chunk0()
     # knob_list.h: 62 knobs; records 0..5 (225 bytes) fit the 244 budget.
-    assert chunk.total == 62
+    assert chunk.total == 69   # +7 AGC lock knobs (0x040D..0x0413)
     assert len(chunk.records) == 6
     wire = P.build_knob_discover_chunk(chunk)
     assert len(wire) == 225 <= P.ATT_PAYLOAD_MAX
@@ -476,7 +480,7 @@ def test_uuid_construction():
 
 
 def test_constants_spot_checks():
-    assert P.PROTO_VER == 0x0101
+    assert P.PROTO_VER == 0x0102
     assert P.OP_KNOB_DISCOVER == 0x14 and P.OP_TEST_REPORT == 0xEA
     assert P.FACTORY_MAGIC == 0x4E415242
     assert P.RATE_SPS[P.RATE_250] == 250 and P.rate_sps(99) == 0

@@ -235,6 +235,10 @@ const NarbisProto = (() => {
        * ships 32-byte frames with this byte in reserved[] = 0, so reading
        * it unconditionally is safe for every frame >= STATUS_SIZE. */
       btnPressed: d.byteLength > 27 ? d.getUint8(27) : 0,
+      /* proto 1.2: bytes 28/29 = AGC acquire/lock state + re-acquire
+       * count (reserved zeros before, which read as OFF / 0). */
+      agcState: d.getUint8(28),
+      agcReacqCount: d.getUint8(29),
       extra: bytesOf(buf).slice(P.STATUS_SIZE),
     };
   }
@@ -352,6 +356,11 @@ const NarbisProto = (() => {
       case P.EV_SELFTEST_DONE:
         if (len !== P.EVLEN_SELFTEST_DONE) break;
         ev.passCount = d.getUint8(8); ev.failCount = d.getUint8(9);
+        ev.known = true; break;
+      case P.EV_AGC_STATE:   /* proto 1.2 */
+        if (len !== P.EVLEN_AGC_STATE) break;
+        ev.state = d.getUint8(8); ev.reason = d.getUint8(9);
+        ev.reacqCount = d.getUint8(10);
         ev.known = true; break;
       default:
         break;

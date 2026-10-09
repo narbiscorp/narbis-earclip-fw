@@ -29,6 +29,8 @@ typedef enum {
     SYS_TEST_IND,        /* TEST builds: LED connect-indicator 500 ms
                             tick (test_led_ind.c) — LED I2C runs in sys
                             ctx so it serializes with ops/AGC           */
+    SYS_AGC_STATE,       /* u.agc_state: acquire/lock transition from
+                            dsp_task (nc_agc_take_change edge)           */
 } sys_msg_type_t;
 
 typedef struct {
@@ -39,6 +41,7 @@ typedef struct {
         struct { bool ppg, accel, ibi, event, hrs; } subs;
         struct { uint8_t len; uint8_t buf[SYS_CTRL_REQ_MAX]; } ctrl;
         struct { bool on; uint8_t reason; } gate;
+        struct { uint8_t state, reason, reacq_count; } agc_state;
         bool flag;
     } u;
 } sys_msg_t;

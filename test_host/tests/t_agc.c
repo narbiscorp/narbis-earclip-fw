@@ -121,6 +121,28 @@ static int drive(nc_agc_t *s, plant_t *p, nc_agc_act_t acts[4])
 
 /* ------------------------------------------------------------------ */
 
+/* The ladder suites below exercise the continuous ladder itself, so
+ * they pin agc_mode = 0; the acquire -> lock wrapper (agc_mode = 1, the
+ * default) has its own suites further down. */
+static void knobs_ladder(void)
+{
+    nc_knobs_init();
+    CHECK_EQ(nc_knob_set_id(0x040D, 0), NC_ST_OK);   /* agc_mode */
+}
+
+/* One evaluate at the current plant time, then advance dt (the real
+ * firmware evaluates every agc_period_ms = 500 ms). */
+static int drive_dt(nc_agc_t *s, plant_t *p, nc_agc_act_t acts[4], uint32_t dt)
+{
+    nc_agc_in_t in;
+    plant_read(p, &in);
+    int n = nc_agc_evaluate(s, &in, acts);
+    CHECK(n >= 0 && n <= 4);
+    apply(p, acts, n);
+    p->now += dt;
+    return n;
+}
+
 static void test_rf_order(void)
 {
     /* Value order codes: [5,4,3,2,1,0,6,7] */
@@ -136,7 +158,7 @@ static void test_rf_order(void)
 
 static void test_converge_from_dark(void)
 {
-    nc_knobs_init();
+    knobs_ladder();
     nc_agc_t s;
     nc_agc_init(&s);
     plant_t p = { .k = { 150000, 200000 }, .dacg = { 10000, 10000 },
@@ -159,7 +181,7 @@ static void test_converge_from_dark(void)
 
 static void test_converge_from_saturated(void)
 {
-    nc_knobs_init();
+    knobs_ladder();
     nc_agc_t s;
     nc_agc_init(&s);
     plant_t p = { .k = { 150000, 150000 }, .dacg = { 10000, 10000 },
@@ -183,7 +205,7 @@ static void test_converge_from_saturated(void)
 
 static void test_no_oscillation_1000(void)
 {
-    nc_knobs_init();
+    knobs_ladder();
     nc_agc_t s;
     nc_agc_init(&s);
     /* Converged start (from test_converge_from_dark end state). */
@@ -230,7 +252,7 @@ static void test_no_oscillation_1000(void)
 
 static void test_hold_honored(void)
 {
-    nc_knobs_init();
+    knobs_ladder();
     nc_agc_t s;
     nc_agc_init(&s);
     plant_t p = { .k = { 150000, 150000 }, .dacg = { 10000, 10000 },
@@ -256,7 +278,7 @@ static void test_hold_honored(void)
 
 static void test_frozen_and_disabled(void)
 {
-    nc_knobs_init();
+    knobs_ladder();
     nc_agc_t s;
     nc_agc_init(&s);
     plant_t p = { .k = { 150000, 150000 }, .dacg = { 10000, 10000 },
@@ -276,7 +298,7 @@ static void test_frozen_and_disabled(void)
 
 static void test_offdac_down_path(void)
 {
-    nc_knobs_init();
+    knobs_ladder();
     nc_agc_t s;
     nc_agc_init(&s);
     /* IR: at min LED already, dc = 1.5M > band top but NOT saturated;
@@ -306,7 +328,7 @@ static void test_offdac_down_path(void)
 
 static void test_gain_down_ladder(void)
 {
-    nc_knobs_init();
+    knobs_ladder();
     nc_agc_t s;
     nc_agc_init(&s);
     /* Both channels blast past saturation even at min LED; offdac too
@@ -351,7 +373,7 @@ static void test_gain_down_ladder(void)
 
 static void test_gain_up_ladder_and_clamps(void)
 {
-    nc_knobs_init();
+    knobs_ladder();
     nc_agc_t s;
     nc_agc_init(&s);
     /* Starved plant: even at max LED + full gain + offdac the dc never
@@ -395,7 +417,7 @@ static void test_gain_up_ladder_and_clamps(void)
 
 static void test_gain_up_requires_both(void)
 {
-    nc_knobs_init();
+    knobs_ladder();
     nc_agc_t s;
     nc_agc_init(&s);
     /* IR starved, RED healthy: gain-up needs BOTH channels to agree,
@@ -422,7 +444,7 @@ static void test_gain_up_requires_both(void)
 
 static void test_knob_max_respected(void)
 {
-    nc_knobs_init();
+    knobs_ladder();
     CHECK_EQ(nc_knob_set_id(0x0407, 45), NC_ST_OK);  /* agc_max_ma_ir */
     nc_agc_t s;
     nc_agc_init(&s);
@@ -432,12 +454,12 @@ static void test_knob_max_respected(void)
     nc_agc_act_t acts[4];
     for (int i = 0; i < 60; i++) drive(&s, &p, acts);  /* apply asserts */
     CHECK_EQ(p.led[0], 45);
-    nc_knobs_init();
+    knobs_ladder();
 }
 
 static void test_rails_and_bad_rf(void)
 {
-    nc_knobs_init();
+    knobs_ladder();
     nc_agc_t s;
     nc_agc_act_t acts[4];
 
@@ -467,7 +489,299 @@ static void test_rails_and_bad_rf(void)
     CHECK_EQ(n, 1);
     CHECK_EQ(acts[0].kind, NC_AGC_GAIN);
     CHECK_EQ(acts[0].rf_code, 3);                    /* 100k -> 50k */
+    knobs_ladder();
+}
+
+/* ------------------------------------------------------------------ */
+/* Acquire -> lock (agc_mode = 1, the default)                         */
+/* ------------------------------------------------------------------ */
+
+/* Converged plant (test_converge_from_dark end state): IR 750000,
+ * RED 800000, both inside the 35..65 % deadband. */
+static plant_t converged_plant(void)
+{
+    plant_t p = { .k = { 150000, 200000 }, .dacg = { 10000, 10000 },
+                  .led = { 5, 4 }, .od = { 0, 0 }, .rf = 2,
+                  .now = 0, .frozen = false, .noise = { 0, 0 } };
+    return p;
+}
+
+/* Lock by STABLE from a converged plant: quiet from now = 0, so it locks
+ * on the evaluation where 8 s of quiet have elapsed (now = 8000). */
+static void lock_stable(nc_agc_t *s, plant_t *p)
+{
+    nc_agc_act_t acts[4];
+    for (int i = 0; i < 5; i++) CHECK_EQ(drive(s, p, acts), 0);
+    CHECK_EQ(s->state, NC_AGC_ST_LOCKED);
+    CHECK_EQ(s->reason, NC_AGC_RSN_STABLE);
+    CHECK_EQ(s->locked_ms, 8000);
+    CHECK(nc_agc_take_change(s));
+}
+
+static void test_init_edge(void)
+{
     nc_knobs_init();
+    CHECK_EQ(nc_knob_get(KNOB_AGC_MODE), 1);          /* lock is the default */
+    nc_agc_t s;
+    nc_agc_init(&s);
+    CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);
+    CHECK_EQ(s.reason, NC_AGC_RSN_START);
+    CHECK_EQ(s.reacq_count, 0);
+    CHECK(nc_agc_take_change(&s));
+    CHECK(!nc_agc_take_change(&s));                   /* edge clears */
+}
+
+static void test_lock_on_beats(void)
+{
+    nc_knobs_init();
+    nc_agc_t s;
+    nc_agc_init(&s);
+    (void)nc_agc_take_change(&s);
+    plant_t p = { .k = { 150000, 200000 }, .dacg = { 10000, 10000 },
+                  .led = { 2, 2 }, .od = { 0, 0 }, .rf = 2,
+                  .now = 0, .frozen = false, .noise = { 0, 0 } };
+    nc_agc_act_t acts[4];
+
+    /* Acquire from dark: the ladder walks up, then sits quiet. */
+    for (int i = 0; i < 6; i++) drive(&s, &p, acts);
+    CHECK(in_band(&p, 0) && in_band(&p, 1));
+    CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);             /* 6 s quiet < 8 s */
+
+    for (int i = 0; i < 5; i++) nc_agc_on_beat(&s, 800, 0, p.now);
+    CHECK_EQ(drive(&s, &p, acts), 0);
+    CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);             /* 5 < agc_lock_beats */
+    nc_agc_on_beat(&s, 800, 0, p.now);
+    CHECK_EQ(drive(&s, &p, acts), 0);
+    CHECK_EQ(s.state, NC_AGC_ST_LOCKED);
+    CHECK_EQ(s.reason, NC_AGC_RSN_BEATS);
+    CHECK(nc_agc_take_change(&s));
+
+    /* Locked: the coupling drifts well past the deadband but stays in
+     * the lock band (12..88 % FS), so nothing moves, ever. */
+    p.k[0] = 230000;                                  /* 1.15M, 55 % */
+    for (int i = 0; i < 50; i++) CHECK_EQ(drive(&s, &p, acts), 0);
+    p.k[0] = 330000;                                  /* 1.65M, 79 % */
+    for (int i = 0; i < 50; i++) CHECK_EQ(drive(&s, &p, acts), 0);
+    CHECK_EQ(s.state, NC_AGC_ST_LOCKED);
+    CHECK_EQ(s.reacq_count, 0);
+    CHECK(!nc_agc_take_change(&s));
+}
+
+static void test_lock_on_stable(void)
+{
+    nc_knobs_init();
+    nc_agc_t s;
+    nc_agc_init(&s);
+    (void)nc_agc_take_change(&s);
+    plant_t p = converged_plant();
+    lock_stable(&s, &p);
+}
+
+static void test_unclean_beats_do_not_lock(void)
+{
+    nc_knobs_init();
+    CHECK_EQ(nc_knob_set_id(0x040F, 60000), NC_ST_OK); /* keep STABLE away */
+    nc_agc_t s;
+    nc_agc_init(&s);
+    plant_t p = converged_plant();
+    nc_agc_act_t acts[4];
+
+    for (int i = 0; i < 10; i++) nc_agc_on_beat(&s, 800, NC_IBIF_GATED_CTX, p.now);
+    for (int i = 0; i < 10; i++) nc_agc_on_beat(&s, 800, NC_IBIF_INTERPOLATED, p.now);
+    CHECK_EQ(drive(&s, &p, acts), 0);
+    CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);
+
+    /* A settling beat in the middle breaks the run: 5 + 5 is not 6. */
+    for (int i = 0; i < 5; i++) nc_agc_on_beat(&s, 800, 0, p.now);
+    nc_agc_on_beat(&s, 800, NC_IBIF_AGC_SETTLING, p.now);
+    for (int i = 0; i < 5; i++) nc_agc_on_beat(&s, 800, 0, p.now);
+    CHECK_EQ(drive(&s, &p, acts), 0);
+    CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);
+
+    /* A gap restart (ibi 0) also breaks it; six clean in a row lock. */
+    nc_agc_on_beat(&s, 0, NC_IBIF_FIRST_AFTER_GAP, p.now);
+    for (int i = 0; i < 6; i++) nc_agc_on_beat(&s, 800, 0, p.now);
+    CHECK_EQ(drive(&s, &p, acts), 0);
+    CHECK_EQ(s.state, NC_AGC_ST_LOCKED);
+    CHECK_EQ(s.reason, NC_AGC_RSN_BEATS);
+}
+
+static void test_beats_need_lock_band(void)
+{
+    nc_knobs_init();
+    CHECK_EQ(nc_knob_set_id(0x040F, 60000), NC_ST_OK);
+    nc_agc_t s;
+    nc_agc_init(&s);
+    nc_agc_act_t acts[4];
+
+    /* IR at 9.5 % FS (below the 12 % lock floor) with LED and offset DAC
+     * railed, RED in band: the ladder has no move, and clean beats must
+     * not lock a level that low. */
+    nc_agc_in_t in = {
+        .dc_raw = { 200000, 800000 }, .sat = { false, false },
+        .led_ma = { 50, 4 }, .rf_code = 2, .offdac = { 15, 0 },
+        .now_ms = 0, .frozen = false
+    };
+    for (int i = 0; i < 8; i++) nc_agc_on_beat(&s, 800, 0, 0);
+    CHECK_EQ(nc_agc_evaluate(&s, &in, acts), 0);
+    CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);
+
+    in.dc_raw[0] = 300000;                            /* 14 %: inside */
+    in.now_ms = 2000;
+    CHECK_EQ(nc_agc_evaluate(&s, &in, acts), 0);
+    CHECK_EQ(s.state, NC_AGC_ST_LOCKED);
+    CHECK_EQ(s.reason, NC_AGC_RSN_BEATS);
+}
+
+static void test_reacquire_on_saturation(void)
+{
+    nc_knobs_init();
+    nc_agc_t s;
+    nc_agc_init(&s);
+    (void)nc_agc_take_change(&s);
+    plant_t p = converged_plant();
+    nc_agc_act_t acts[4];
+    lock_stable(&s, &p);                              /* locked at 8000 */
+
+    /* Clip from now = 10000, evaluated every 500 ms like the firmware.
+     * agc_reacq_min_s = 30 holds the lock until now = 38000. */
+    p.k[0] = 450000;                                  /* 5 mA -> 2.25M */
+    while (p.now < 38000) {
+        CHECK_EQ(drive_dt(&s, &p, acts, 500), 0);
+        CHECK_EQ(s.state, NC_AGC_ST_LOCKED);
+    }
+    CHECK(drive_dt(&s, &p, acts, 500) > 0);           /* re-acquire acts at once */
+    CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);
+    CHECK_EQ(s.reason, NC_AGC_RSN_SAT);
+    CHECK_EQ(s.reacq_count, 1);
+    CHECK(nc_agc_take_change(&s));
+
+    /* Back into the band, then locked again (stable). */
+    for (int i = 0; i < 40 && s.state != NC_AGC_ST_LOCKED; i++) drive(&s, &p, acts);
+    CHECK(in_band(&p, 0) && in_band(&p, 1));
+    CHECK_EQ(s.state, NC_AGC_ST_LOCKED);
+    CHECK_EQ(s.reacq_count, 1);
+}
+
+static void test_transient_saturation_ignored(void)
+{
+    nc_knobs_init();
+    nc_agc_t s;
+    nc_agc_init(&s);
+    plant_t p = converged_plant();
+    nc_agc_act_t acts[4];
+    lock_stable(&s, &p);
+
+    p.now = 60000;                                    /* past min spacing */
+    /* Clip for 2.5 s (5 windows), clear for one, three times over: never
+     * 3 s continuous, so the lock holds. */
+    for (int round = 0; round < 3; round++) {
+        p.k[0] = 450000;
+        for (int i = 0; i < 5; i++) CHECK_EQ(drive_dt(&s, &p, acts, 500), 0);
+        p.k[0] = 150000;
+        CHECK_EQ(drive_dt(&s, &p, acts, 500), 0);
+    }
+    CHECK_EQ(s.state, NC_AGC_ST_LOCKED);
+    CHECK_EQ(s.reacq_count, 0);
+}
+
+static void test_drift_reacquire_waits_for_beats_to_stop(void)
+{
+    nc_knobs_init();
+    nc_agc_t s;
+    nc_agc_init(&s);
+    plant_t p = converged_plant();
+    nc_agc_act_t acts[4];
+    lock_stable(&s, &p);
+
+    /* IR falls to 9.5 % FS, outside the lock band, but beats keep coming:
+     * the signal is doing its job, so the lock holds. */
+    p.k[0] = 40000;
+    for (int i = 0; i < 120; i++) {                   /* 60 s at 500 ms */
+        if (i % 2 == 0) nc_agc_on_beat(&s, 800, 0, p.now);
+        CHECK_EQ(drive_dt(&s, &p, acts, 500), 0);
+    }
+    CHECK_EQ(s.state, NC_AGC_ST_LOCKED);
+
+    /* Beats stop: re-acquire once agc_reacq_drift_ms (15 s) have passed
+     * since the last clean beat. */
+    const uint64_t last_beat = s.last_beat_ms;
+    int n = 0;
+    while (s.state == NC_AGC_ST_LOCKED && p.now < last_beat + 20000) {
+        n = drive_dt(&s, &p, acts, 500);
+    }
+    CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);
+    CHECK_EQ(s.reason, NC_AGC_RSN_DRIFT);
+    CHECK(p.now - 500 >= last_beat + 15000);
+    CHECK(p.now - 500 < last_beat + 15500);
+    CHECK(n > 0);                                     /* LED steps up at once */
+}
+
+static void test_freeze_unfreeze_edges(void)
+{
+    nc_knobs_init();
+    nc_agc_t s;
+    nc_agc_init(&s);
+    (void)nc_agc_take_change(&s);
+    plant_t p = converged_plant();
+    nc_agc_act_t acts[4];
+    lock_stable(&s, &p);
+
+    p.frozen = true;
+    CHECK_EQ(drive(&s, &p, acts), 0);
+    CHECK_EQ(s.state, NC_AGC_ST_OFF);
+    CHECK_EQ(s.reason, NC_AGC_RSN_MANUAL);
+    CHECK(nc_agc_take_change(&s));
+    nc_agc_reacquire(&s, NC_AGC_RSN_WEAR);            /* frozen wins */
+    CHECK_EQ(s.state, NC_AGC_ST_OFF);
+
+    p.frozen = false;
+    CHECK_EQ(drive(&s, &p, acts), 0);                 /* in band: nothing to do */
+    CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);
+    CHECK_EQ(s.reason, NC_AGC_RSN_MANUAL);
+    CHECK_EQ(s.reacq_count, 0);                       /* OFF -> ACQUIRE is no re-acquire */
+    CHECK(nc_agc_take_change(&s));
+
+    /* agc_en off behaves like a freeze. */
+    CHECK_EQ(nc_knob_set_id(0x0401, 0), NC_ST_OK);
+    CHECK_EQ(drive(&s, &p, acts), 0);
+    CHECK_EQ(s.state, NC_AGC_ST_OFF);
+    CHECK_EQ(nc_knob_set_id(0x0401, 1), NC_ST_OK);
+    CHECK_EQ(drive(&s, &p, acts), 0);
+    CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);
+}
+
+static void test_reacquire_api_and_mode_switch(void)
+{
+    nc_knobs_init();
+    nc_agc_t s;
+    nc_agc_init(&s);
+    plant_t p = converged_plant();
+    nc_agc_act_t acts[4];
+    lock_stable(&s, &p);
+
+    nc_agc_reacquire(&s, NC_AGC_RSN_WEAR);            /* put on */
+    CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);
+    CHECK_EQ(s.reason, NC_AGC_RSN_WEAR);
+    CHECK_EQ(s.reacq_count, 1);
+    CHECK(nc_agc_take_change(&s));
+    nc_agc_reacquire(&s, NC_AGC_RSN_WEAR);            /* already acquiring */
+    CHECK(!nc_agc_take_change(&s));
+    CHECK_EQ(s.reacq_count, 1);
+
+    p.now = 0;                                        /* lock_stable's clock */
+    lock_stable(&s, &p);
+    /* Continuous mode resumes the legacy ladder and never locks again. */
+    CHECK_EQ(nc_knob_set_id(0x040D, 0), NC_ST_OK);
+    CHECK_EQ(drive(&s, &p, acts), 0);
+    CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);
+    CHECK_EQ(s.reason, NC_AGC_RSN_MODE);
+    p.k[0] = 330000;                                  /* out of the deadband */
+    int acted = 0;
+    for (int i = 0; i < 40; i++) acted += drive(&s, &p, acts);
+    CHECK(acted > 0);
+    CHECK(in_band(&p, 0));
+    CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);
 }
 
 int main(void)
@@ -485,5 +799,15 @@ int main(void)
     TST_RUN(test_gain_up_requires_both);
     TST_RUN(test_knob_max_respected);
     TST_RUN(test_rails_and_bad_rf);
+    TST_RUN(test_init_edge);
+    TST_RUN(test_lock_on_beats);
+    TST_RUN(test_lock_on_stable);
+    TST_RUN(test_unclean_beats_do_not_lock);
+    TST_RUN(test_beats_need_lock_band);
+    TST_RUN(test_reacquire_on_saturation);
+    TST_RUN(test_transient_saturation_ignored);
+    TST_RUN(test_drift_reacquire_waits_for_beats_to_stop);
+    TST_RUN(test_freeze_unfreeze_edges);
+    TST_RUN(test_reacquire_api_and_mode_switch);
     TST_REPORT();
 }

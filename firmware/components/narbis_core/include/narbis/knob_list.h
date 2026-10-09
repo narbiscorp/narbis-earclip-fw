@@ -57,6 +57,15 @@ X(AGC_MAX_MA_RED,      0x0409, "agc_max_ma_red",        NC_KNOB_U8,       1,    
 X(AGC_SETTLE_MS,       0x040A, "agc_settle_ms",         NC_KNOB_U16,     50,   1000,    200, "ms",    KPL) \
 X(AGC_HOLD_MS,         0x040B, "agc_hold_ms",           NC_KNOB_U16,    500,  10000,   2000, "ms",    KPL) \
 X(AGC_OFFDAC_EN,       0x040C, "agc_offdac_en",         NC_KNOB_BOOL,     0,      1,      1, "",      KPL) \
+/*   acquire -> lock (nc_agc.h): 0 = legacy continuous ladder; 1 = adjust only   */ \
+/*   until clean beats lock it, then re-acquire only on sustained clip / drift.   */ \
+X(AGC_MODE,            0x040D, "agc_mode",              NC_KNOB_U8,       0,      1,      1, "",      KPL) \
+X(AGC_LOCK_BEATS,      0x040E, "agc_lock_beats",        NC_KNOB_U8,       1,     30,      6, "beats", KPL) \
+X(AGC_LOCK_STABLE_MS,  0x040F, "agc_lock_stable_ms",    NC_KNOB_U16,   1000,  60000,   8000, "ms",    KPL) \
+X(AGC_LOCK_BAND_PCT,   0x0410, "agc_lock_band_pct",     NC_KNOB_U8,      10,     50,     38, "%FS",   KPL) \
+X(AGC_REACQ_SAT_MS,    0x0411, "agc_reacq_sat_ms",      NC_KNOB_U16,    500,  30000,   3000, "ms",    KPL) \
+X(AGC_REACQ_DRIFT_MS,  0x0412, "agc_reacq_drift_ms",    NC_KNOB_U16,   1000,  60000,  15000, "ms",    KPL) \
+X(AGC_REACQ_MIN_S,     0x0413, "agc_reacq_min_s",       NC_KNOB_U16,      5,   3600,     30, "s",     KPL) \
 /* -- DSP (0x05xx) ------------------------------------------------------------------ */ \
 X(HP_FC_X100,          0x0501, "hp_fc_x100",            NC_KNOB_U16,     10,    200,     50, "cHz",   KPS) \
 X(BP_LO_X100,          0x0502, "bp_lo_x100",            NC_KNOB_U16,     20,    200,     50, "cHz",   KPS) \

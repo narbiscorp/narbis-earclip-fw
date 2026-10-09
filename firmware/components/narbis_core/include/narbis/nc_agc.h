@@ -28,10 +28,35 @@
  *
  * Any emitted action restarts the agc_hold_ms window (one hold window
  * covers the caller's settle blanking).
+ *
+ * Acquire -> lock (agc_mode = 1, the default). Every ladder action is
+ * a step in the raw signal, and a step every couple of seconds is
+ * poison for beat detection and for recording raw data to develop it.
+ * So the ladder only runs while ACQUIRING — from stream start
+ * (nc_agc_init), wear-on, unfreeze, or a re-acquire — and then LOCKS,
+ * after which nothing is actuated at all:
+ *   - BEATS:  agc_lock_beats consecutive clean beats (nc_agc_on_beat)
+ *             with neither channel clipping and both inside the lock
+ *             band (target ± agc_lock_band_pct), or
+ *   - STABLE: both channels in the target deadband, nothing to do,
+ *             for agc_lock_stable_ms (covers a weak pulse the detector
+ *             cannot see yet — the level is right, stop touching it).
+ * While LOCKED it re-acquires only when the signal is unusable for long
+ * enough to be worth a step, and never sooner than agc_reacq_min_s
+ * after it locked:
+ *   - SAT:    either channel clipping on every evaluation for
+ *             agc_reacq_sat_ms (clipped samples are lost data), or
+ *   - DRIFT:  either channel outside the lock band for
+ *             agc_reacq_drift_ms with NO clean beat in that time (if
+ *             beats are still coming, the signal is doing its job).
+ * Wear-on and unfreeze also re-acquire (the caller reports wear-on via
+ * nc_agc_reacquire; freeze is an input). agc_mode = 0 keeps the legacy
+ * continuous ladder, which never locks.
  */
 #pragma once
 #include <stdint.h>
 #include <stdbool.h>
+#include "narbis/nc_types.h"   /* nc_agc_state_t / nc_agc_reason_t, NC_IBIF_* */
 
 #define NC_AGC_CH_IR    0
 #define NC_AGC_CH_RED   1
@@ -86,13 +111,46 @@ typedef struct {
 typedef struct {
     uint64_t last_step_ms;
     bool     stepped_once;   /* false -> hold gate open on first call */
+    /* acquire -> lock (see header). Run flags pair with their *_since
+     * stamps because 0 ms is a valid time on the host-test clock. */
+    uint8_t  state;          /* nc_agc_state_t                          */
+    uint8_t  reason;         /* nc_agc_reason_t of the last transition   */
+    uint8_t  reacq_count;    /* LOCKED -> ACQUIRE transitions, sat 255   */
+    uint8_t  clean_beats;    /* consecutive clean beats since last action */
+    bool     changed;        /* transition not yet taken by the caller   */
+    bool     quiet;          /* ACQUIRE: in-band idle run in progress    */
+    bool     sat_run;        /* LOCKED: clipping run in progress         */
+    bool     drift_run;      /* LOCKED: out-of-lock-band run in progress */
+    bool     beat_seen;      /* a clean beat has ever been reported      */
+    uint64_t quiet_since_ms;
+    uint64_t sat_since_ms;
+    uint64_t drift_since_ms;
+    uint64_t locked_ms;
+    uint64_t last_beat_ms;   /* time of the last clean beat              */
 } nc_agc_t;
 
+/* -> ACQUIRE with reason START, and a pending change edge. */
 void nc_agc_init(nc_agc_t *s);
 
 /* Returns the number of actions written to out[] (0..4: worst case is
- * one GAIN + two OFFDAC recenters, or one LED/OFFDAC per channel). */
+ * one GAIN + two OFFDAC recenters, or one LED/OFFDAC per channel).
+ * Always 0 while LOCKED unless this very call decided to re-acquire. */
 int nc_agc_evaluate(nc_agc_t *s, const nc_agc_in_t *in, nc_agc_act_t out[4]);
+
+/* Feed every IBI record (flags NC_IBIF_*). Clean = an interval with none
+ * of GATED_CTX / AGC_SETTLING / INTERPOLATED / FIRST_AFTER_GAP; anything
+ * else breaks the consecutive run. Same clock as nc_agc_in_t.now_ms. */
+void nc_agc_on_beat(nc_agc_t *s, uint16_t ibi_ms, uint8_t ibi_flags,
+                    uint64_t now_ms);
+
+/* Restart acquisition from outside (wear-on). LOCKED -> ACQUIRE with
+ * `reason` and a change edge; already ACQUIRE -> counters restart, no
+ * edge; OFF (frozen/disabled) -> ignored, the unfreeze re-acquires. */
+void nc_agc_reacquire(nc_agc_t *s, uint8_t reason);
+
+/* True once per state transition (then clears) — the caller emits
+ * NC_EV_AGC_STATE {state, reason, reacq_count} on it. */
+bool nc_agc_take_change(nc_agc_t *s);
 
 /* TIA RF code <-> gain-value rank. The AFE4404 TIA_GAIN RF field is
  * NOT monotonic in code; ascending gain value order is

@@ -21,7 +21,9 @@
 #include "narbis/nc_types.h"
 
 #define NC_PROTO_VER_MAJOR  1
-#define NC_PROTO_VER_MINOR  1   /* 1.1: +TEST_LED_SWEEP_CONT (additive) */
+#define NC_PROTO_VER_MINOR  2   /* 1.1: +TEST_LED_SWEEP_CONT (additive)
+                                   1.2: +EV_AGC_STATE, STATUS agc_state /
+                                        agc_reacq_count (additive)      */
 #define NC_PROTO_VER        ((NC_PROTO_VER_MAJOR << 8) | NC_PROTO_VER_MINOR)
 
 /* ------------------------------------------------------------------ */
@@ -120,6 +122,7 @@ typedef struct NC_PACKED {
 #define NC_EVLEN_RATE_CHANGE   10  /* t_us, old_code, new_code                  */
 #define NC_EVLEN_AGC_OFFDAC    11  /* t_us, phase, old_code, new_code           */
 #define NC_EVLEN_SELFTEST_DONE 10  /* t_us, pass_count, fail_count              */
+#define NC_EVLEN_AGC_STATE     11  /* t_us, state, reason, reacq_count (1.2)    */
 
 #define NC_MARKER_SRC_BUTTON   0
 #define NC_MARKER_SRC_HOST     1
@@ -159,7 +162,9 @@ typedef struct NC_PACKED {
     uint16_t ibi_last_ms;
     uint8_t  hr_bpm;               /* smoothed; 0 = none */
     uint8_t  btn_pressed;          /* live GPIO2 level (1 = held), proto 1.1 */
-    uint8_t  reserved[4];
+    uint8_t  agc_state;            /* nc_agc_state_t, proto 1.2 */
+    uint8_t  agc_reacq_count;      /* re-acquisitions since stream start (sat 255), 1.2 */
+    uint8_t  reserved[2];
 } nc_status_t;
 
 #define NC_STF_CHARGING       (1u << 0)

@@ -88,6 +88,10 @@ static uint8_t s_batt_pct_sent = 0xFF;
 
 static bool s_agc_frozen;
 static int8_t s_offdac[2];            /* cached codes; sys is sole writer */
+/* AGC acquire/lock as last reported by dsp_task (SYS_AGC_STATE). STATUS
+ * shows OFF whenever PPG is not running, whatever was stored here. */
+static uint8_t s_agc_state = NC_AGC_ST_OFF;
+static uint8_t s_agc_reacq;
 static nc_rate_t s_rate_live = NC_RATE_100;
 
 static bool s_boot_lowbatt;           /* LOWBATT boot-refusal mode      */
@@ -213,6 +217,8 @@ static void status_sync(bool force)
     st.ibi_last_ms = ag.ibi_last_ms;
     st.hr_bpm = ag.hr_bpm;
     st.btn_pressed = button_is_pressed() ? 1 : 0;   /* proto 1.1 */
+    st.agc_state = acq_ppg_running() ? s_agc_state : NC_AGC_ST_OFF;  /* 1.2 */
+    st.agc_reacq_count = s_agc_reacq;
 
     uint8_t buf[NC_ATT_PAYLOAD_MAX];
     size_t len = nc_enc_status(buf, &st);
@@ -1141,6 +1147,19 @@ void sys_task_run(void *arg)
             ev_emit(NC_EV_GATE, d, 2);
             g_diag.gate_transitions++;
             status_sync(false);
+            break;
+        }
+        case SYS_AGC_STATE: {
+            s_agc_state = m.u.agc_state.state;
+            s_agc_reacq = m.u.agc_state.reacq_count;
+            const uint8_t d[3] = { m.u.agc_state.state, m.u.agc_state.reason,
+                                   m.u.agc_state.reacq_count };
+            ev_emit(NC_EV_AGC_STATE, d, 3);
+            ESP_LOGI(TAG, "AGC %s (reason %u, re-acquired %u)",
+                     s_agc_state == NC_AGC_ST_LOCKED ? "LOCKED"
+                     : s_agc_state == NC_AGC_ST_ACQUIRE ? "ACQUIRE" : "OFF",
+                     (unsigned)m.u.agc_state.reason, (unsigned)s_agc_reacq);
+            status_sync(true);   /* the host sees the transition now, not in 1 s */
             break;
         }
         case SYS_POWER_OFF_REQ:
