@@ -287,6 +287,7 @@ const PROTO = {
     { sym: "AGC_REACQ_DRIFT_MS", id: 0x0412, name: "agc_reacq_drift_ms", type: 2, min: 1000, max: 60000, def: 15000, unit: "ms", flags: 3 },
     { sym: "AGC_REACQ_MIN_S", id: 0x0413, name: "agc_reacq_min_s", type: 2, min: 5, max: 3600, def: 30, unit: "s", flags: 3 },
     { sym: "AGC_OFFEAR_HOLD_S", id: 0x0414, name: "agc_offear_hold_s", type: 2, min: 0, max: 600, def: 20, unit: "s", flags: 3 },
+    { sym: "AGC_PROBE_MAX_MA", id: 0x0415, name: "agc_probe_max_ma", type: 1, min: 1, max: 50, def: 10, unit: "mA", flags: 3 },
     { sym: "HP_FC_X100", id: 0x0501, name: "hp_fc_x100", type: 2, min: 10, max: 200, def: 50, unit: "cHz", flags: 5 },
     { sym: "BP_LO_X100", id: 0x0502, name: "bp_lo_x100", type: 2, min: 20, max: 200, def: 50, unit: "cHz", flags: 5 },
     { sym: "BP_HI_X100", id: 0x0503, name: "bp_hi_x100", type: 2, min: 300, max: 1500, def: 800, unit: "cHz", flags: 5 },

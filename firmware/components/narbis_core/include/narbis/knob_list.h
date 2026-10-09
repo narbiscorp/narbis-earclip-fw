@@ -69,6 +69,9 @@ X(AGC_REACQ_MIN_S,     0x0413, "agc_reacq_min_s",       NC_KNOB_U16,      5,   3
 /*   off-ear hold: once a stream has locked, leave the settings alone while the    */ \
 /*   wear detector says off-ear, for at most this long (0 = never hold).           */ \
 X(AGC_OFFEAR_HOLD_S,   0x0414, "agc_offear_hold_s",     NC_KNOB_U16,      0,    600,     20, "s",     KPL) \
+/*   probe: before the first worn lock of a stream, while off-ear, only the LEDs  */ \
+/*   move and never above this — an empty clip cannot crush offdac / gain.        */ \
+X(AGC_PROBE_MAX_MA,    0x0415, "agc_probe_max_ma",      NC_KNOB_U8,       1,     50,     10, "mA",    KPL) \
 /* -- DSP (0x05xx) ------------------------------------------------------------------ */ \
 X(HP_FC_X100,          0x0501, "hp_fc_x100",            NC_KNOB_U16,     10,    200,     50, "cHz",   KPS) \
 X(BP_LO_X100,          0x0502, "bp_lo_x100",            NC_KNOB_U16,     20,    200,     50, "cHz",   KPS) \

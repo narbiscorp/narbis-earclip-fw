@@ -60,6 +60,9 @@ static void to_locked(nc_agc_t *s, uint8_t reason, const nc_agc_in_t *in)
     enter(s, NC_AGC_ST_LOCKED, reason);
     s->locked_ms = in->now_ms;
     s->locked_this_stream = true;
+    if (in->off_ear) {
+        return;   /* not a wearer's settings: no restore record */
+    }
     /* The settings this wearer locked at: the put-back restore target. */
     s->lock_cfg_valid = true;
     s->lock_rf_code = in->rf_code;
@@ -163,16 +166,24 @@ static void led_limits(int32_t minma[2], int32_t maxma[2])
     }
 }
 
+/* probe: PROBE (nc_agc.h) — LEDs only, capped at agc_probe_max_ma. */
 static int ladder(nc_agc_t *s, const nc_agc_in_t *in, const agc_band_t *b,
-                  nc_agc_act_t out[4])
+                  nc_agc_act_t out[4], bool probe)
 {
     const int32_t lo = b->lo;
     const int32_t hi = b->hi;
     const int32_t step = nc_knob_get(KNOB_AGC_STEP_MA);
-    const bool od_en = nc_knob_get(KNOB_AGC_OFFDAC_EN) != 0;
+    const bool od_en = !probe && nc_knob_get(KNOB_AGC_OFFDAC_EN) != 0;
 
     int32_t minma[2], maxma[2];
     led_limits(minma, maxma);
+    if (probe) {
+        const int32_t cap = nc_knob_get(KNOB_AGC_PROBE_MAX_MA);
+        for (int c = 0; c < 2; c++) {
+            if (maxma[c] > cap) maxma[c] = cap;
+            if (minma[c] > maxma[c]) minma[c] = maxma[c];
+        }
+    }
 
     int n = 0;
 
@@ -193,7 +204,7 @@ static int ladder(nc_agc_t *s, const nc_agc_in_t *in, const agc_band_t *b,
     }
     const int rank = nc_agc_rf_rank(in->rf_code);
     int new_rank = rank;
-    if (rank >= 0) {
+    if (rank >= 0 && !probe) {
         if (dn_req && rank > 0) new_rank = rank - 1;          /* either */
         else if (up_req && rank < 7) new_rank = rank + 1;     /* both   */
     }
@@ -286,7 +297,7 @@ static int restore(nc_agc_t *s, const nc_agc_in_t *in, const agc_band_t *b,
         s->stepped_once = true;
         return n;
     }
-    return ladder(s, in, b, out);
+    return ladder(s, in, b, out, false);
 }
 
 /* ------------------------------------------------------------------ */
@@ -442,13 +453,21 @@ int nc_agc_evaluate(nc_agc_t *s, const nc_agc_in_t *in, nc_agc_act_t out[4])
 
     const uint32_t hold = (uint32_t)nc_knob_get(KNOB_AGC_HOLD_MS);
     const bool ran = !s->stepped_once || (in->now_ms - s->last_step_ms) >= hold;
+    /* PROBE (nc_agc.h): off-ear before this stream's first lock. */
+    const bool probe = lock_mode && in->off_ear && !s->locked_this_stream;
     int n = 0;
     if (ran) {
-        n = s->restore_phase ? restore(s, in, &b, out) : ladder(s, in, &b, out);
+        n = s->restore_phase ? restore(s, in, &b, out)
+                             : ladder(s, in, &b, out, probe);
     }
 
     if (lock_mode && s->state == NC_AGC_ST_ACQUIRE) {
-        acquire_progress(s, in, &b, n, ran);
+        if (probe) {
+            s->clean_beats = 0;   /* nothing locks on an off-ear clip */
+            s->quiet = false;
+        } else {
+            acquire_progress(s, in, &b, n, ran);
+        }
     }
     return n;
 }

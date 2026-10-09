@@ -923,6 +923,102 @@ static void test_putback_restores_lock_settings(void)
     CHECK_EQ(p.led[0], 3);
 }
 
+static int count_kind(const nc_agc_act_t *a, int n, nc_agc_kind_t kind)
+{
+    int k = 0;
+    for (int i = 0; i < n; i++) k += (a[i].kind == kind);
+    return k;
+}
+
+/* PROBE (second on-ear run): an empty clip in the air before any lock.
+ * Normally the ladder would take the LEDs to max, then offdac, then
+ * gain; probing stops the LEDs at agc_probe_max_ma (10), touches nothing
+ * else and never locks. Worn lifts the cap. */
+static void test_probe_caps_leds_off_ear(void)
+{
+    nc_knobs_init();
+    nc_agc_t s;
+    nc_agc_init(&s);
+    nc_agc_act_t acts[4];
+    plant_t p = { .k = { 20000, 20000 }, .dacg = { 10000, 10000 },
+                  .led = { 2, 2 }, .od = { 0, 0 }, .rf = 2, .off_ear = true };
+    for (int i = 0; i < 60; i++) {
+        int n = drive(&s, &p, acts);
+        CHECK_EQ(count_kind(acts, n, NC_AGC_GAIN), 0);
+        CHECK_EQ(count_kind(acts, n, NC_AGC_OFFDAC), 0);
+    }
+    CHECK_EQ(p.led[0], 10);
+    CHECK_EQ(p.led[1], 10);
+    CHECK_EQ(p.rf, 2);
+    CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);              /* never locked */
+
+    p.off_ear = false;                                /* put on: full ladder */
+    CHECK(drive(&s, &p, acts) > 0);
+    CHECK_EQ(p.led[0], 11);
+}
+
+/* PROBE, the run that crushed the gain: an empty clip facing a surface
+ * saturates even at the minimum LED. Probing walks the LEDs down and
+ * stops; offdac and gain stay at their start values, so the ear goes on
+ * to a sane plant and acquires normally. */
+static void test_probe_saturated_empty_clip(void)
+{
+    nc_knobs_init();
+    nc_agc_t s;
+    nc_agc_init(&s);
+    nc_agc_act_t acts[4];
+    plant_t p = { .k = { 1000000, 1000000 }, .dacg = { 10000, 10000 },
+                  .led = { 5, 5 }, .od = { 0, 0 }, .rf = 2, .off_ear = true };
+    for (int i = 0; i < 60; i++) {
+        int n = drive(&s, &p, acts);
+        CHECK_EQ(count_kind(acts, n, NC_AGC_GAIN), 0);
+        CHECK_EQ(count_kind(acts, n, NC_AGC_OFFDAC), 0);
+    }
+    CHECK_EQ(p.led[0], 2);
+    CHECK_EQ(p.od[0], 0);
+    CHECK_EQ(p.rf, 2);
+    CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);
+
+    p.k[0] = 150000;                                  /* the ear */
+    p.k[1] = 200000;
+    p.off_ear = false;
+    for (int i = 0; i < 40 && s.state != NC_AGC_ST_LOCKED; i++) drive(&s, &p, acts);
+    CHECK_EQ(s.state, NC_AGC_ST_LOCKED);
+    CHECK(in_band(&p, 0) && in_band(&p, 1));
+    CHECK_EQ(p.rf, 2);
+}
+
+/* A lock reached while off-ear (after the hold expired) is not a
+ * wearer's: the put-back restore keeps the last WORN lock. */
+static void test_offear_lock_is_not_recorded(void)
+{
+    nc_knobs_init();
+    nc_agc_t s;
+    nc_agc_init(&s);
+    nc_agc_act_t acts[4];
+    plant_t p = converged_plant();
+    lock_stable(&s, &p);                              /* worn: led 5/4 */
+
+    /* Off the ear long enough for the hold to expire and SAT to fire,
+     * then the empty clip settles in band and locks while off-ear. */
+    p.now = 60000;
+    p.off_ear = true;
+    p.k[0] = 450000;
+    for (int i = 0; i < 200 && s.state != NC_AGC_ST_ACQUIRE; i++) drive_dt(&s, &p, acts, 500);
+    CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);
+    CHECK_EQ(s.reason, NC_AGC_RSN_SAT);
+    for (int i = 0; i < 60 && s.state != NC_AGC_ST_LOCKED; i++) drive(&s, &p, acts);
+    CHECK_EQ(s.state, NC_AGC_ST_LOCKED);
+    CHECK(p.led[0] != 5);                             /* different settings */
+
+    p.off_ear = false;
+    p.led[0] = p.led[1] = 2;
+    nc_agc_reacquire(&s, NC_AGC_RSN_WEAR);
+    CHECK(drive(&s, &p, acts) >= 2);
+    CHECK_EQ(p.led[0], 5);                            /* the worn lock */
+    CHECK_EQ(p.led[1], 4);
+}
+
 int main(void)
 {
     nc_knobs_init();
@@ -951,5 +1047,8 @@ int main(void)
     TST_RUN(test_offear_hold_keeps_lock);
     TST_RUN(test_offear_hold_needs_a_lock_this_stream);
     TST_RUN(test_putback_restores_lock_settings);
+    TST_RUN(test_probe_caps_leds_off_ear);
+    TST_RUN(test_probe_saturated_empty_clip);
+    TST_RUN(test_offear_lock_is_not_recorded);
     TST_REPORT();
 }
