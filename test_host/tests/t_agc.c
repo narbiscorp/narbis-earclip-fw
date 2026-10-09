@@ -547,10 +547,12 @@ static void test_lock_on_beats(void)
     CHECK(in_band(&p, 0) && in_band(&p, 1));
     CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);             /* 6 s quiet < 8 s */
 
-    for (int i = 0; i < 5; i++) nc_agc_on_beat(&s, 800, 0, p.now);
+    /* Real beats carry INTERPOLATED (nc_ibi's sub-sample peak refinement
+     * succeeds on nearly every good beat): they are clean and must lock. */
+    for (int i = 0; i < 5; i++) nc_agc_on_beat(&s, 800, NC_IBIF_INTERPOLATED, p.now);
     CHECK_EQ(drive(&s, &p, acts), 0);
     CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);             /* 5 < agc_lock_beats */
-    nc_agc_on_beat(&s, 800, 0, p.now);
+    nc_agc_on_beat(&s, 800, NC_IBIF_INTERPOLATED, p.now);
     CHECK_EQ(drive(&s, &p, acts), 0);
     CHECK_EQ(s.state, NC_AGC_ST_LOCKED);
     CHECK_EQ(s.reason, NC_AGC_RSN_BEATS);
@@ -587,7 +589,8 @@ static void test_unclean_beats_do_not_lock(void)
     nc_agc_act_t acts[4];
 
     for (int i = 0; i < 10; i++) nc_agc_on_beat(&s, 800, NC_IBIF_GATED_CTX, p.now);
-    for (int i = 0; i < 10; i++) nc_agc_on_beat(&s, 800, NC_IBIF_INTERPOLATED, p.now);
+    for (int i = 0; i < 10; i++)                      /* refinement doesn't redeem it */
+        nc_agc_on_beat(&s, 800, NC_IBIF_AGC_SETTLING | NC_IBIF_INTERPOLATED, p.now);
     CHECK_EQ(drive(&s, &p, acts), 0);
     CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);
 
@@ -698,7 +701,7 @@ static void test_drift_reacquire_waits_for_beats_to_stop(void)
      * the signal is doing its job, so the lock holds. */
     p.k[0] = 40000;
     for (int i = 0; i < 120; i++) {                   /* 60 s at 500 ms */
-        if (i % 2 == 0) nc_agc_on_beat(&s, 800, 0, p.now);
+        if (i % 2 == 0) nc_agc_on_beat(&s, 800, NC_IBIF_INTERPOLATED, p.now);
         CHECK_EQ(drive_dt(&s, &p, acts, 500), 0);
     }
     CHECK_EQ(s.state, NC_AGC_ST_LOCKED);

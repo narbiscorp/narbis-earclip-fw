@@ -138,8 +138,10 @@ void nc_agc_init(nc_agc_t *s);
 int nc_agc_evaluate(nc_agc_t *s, const nc_agc_in_t *in, nc_agc_act_t out[4]);
 
 /* Feed every IBI record (flags NC_IBIF_*). Clean = an interval with none
- * of GATED_CTX / AGC_SETTLING / INTERPOLATED / FIRST_AFTER_GAP; anything
- * else breaks the consecutive run. Same clock as nc_agc_in_t.now_ms. */
+ * of GATED_CTX / AGC_SETTLING / FIRST_AFTER_GAP; anything else breaks the
+ * consecutive run. INTERPOLATED (sub-sample peak refinement, set on nearly
+ * every good beat) does not count against a beat. Same clock as
+ * nc_agc_in_t.now_ms. */
 void nc_agc_on_beat(nc_agc_t *s, uint16_t ibi_ms, uint8_t ibi_flags,
                     uint64_t now_ms);
 

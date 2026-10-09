@@ -10,9 +10,13 @@
  * (SBAS689: 0=500k 1=250k 2=100k 3=50k 4=25k 5=10k 6=1M 7=2M). */
 static const uint8_t rf_value_order[8] = { 5, 4, 3, 2, 1, 0, 6, 7 };
 
-/* IBI flags that disqualify a beat from counting toward a lock. */
+/* IBI flags that disqualify a beat from counting toward a lock.
+ * NOT INTERPOLATED: nc_ibi sets it whenever the parabolic sub-sample
+ * peak refinement succeeds, i.e. on nearly every good beat. Counting it
+ * as unclean meant real beats could never lock, nor hold off a drift
+ * re-acquire (first hardware run, 2026-10-09). */
 #define AGC_UNCLEAN_IBIF (NC_IBIF_GATED_CTX | NC_IBIF_AGC_SETTLING | \
-                          NC_IBIF_INTERPOLATED | NC_IBIF_FIRST_AFTER_GAP)
+                          NC_IBIF_FIRST_AFTER_GAP)
 
 int nc_agc_rf_rank(uint8_t rf_code)
 {
