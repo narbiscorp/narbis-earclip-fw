@@ -103,3 +103,29 @@ void nc_dsp_run(nc_chan_dsp_t *d, int32_t x, nc_dsp_out_t *out)
     out->hp = hp;
     out->bp = bp;
 }
+
+void nc_dsp_scale(nc_chan_dsp_t *d, int32_t r_q16)
+{
+    d->dc_acc = nc_mul_q16(d->dc_acc, r_q16);
+    d->dc = (int32_t)(d->dc_acc >> 16);
+    for (int i = 0; i < 3; i++) {
+        d->bq_s[i].s1 = nc_mul_q16(d->bq_s[i].s1, r_q16);
+        d->bq_s[i].s2 = nc_mul_q16(d->bq_s[i].s2, r_q16);
+    }
+}
+
+void nc_dsp_rebase(nc_chan_dsp_t *d, int32_t x, int32_t hp_target)
+{
+    /* nc_dsp_run moves the DC by alpha * (x - dc) before subtracting, so
+     * hp comes out at hp_target * (1 - alpha): a 3 % shrink of one
+     * sample at the 0.5 Hz / 100 sps corner, far below a pulse's slope. */
+    d->dc = x - hp_target;
+    d->dc_acc = (int64_t)d->dc * 65536;
+}
+
+void nc_dsp_reprime(nc_chan_dsp_t *d, int32_t x)
+{
+    d->dc = x;
+    d->dc_acc = (int64_t)x * 65536;
+    memset(d->bq_s, 0, sizeof(d->bq_s));
+}

@@ -51,6 +51,7 @@
 #include "narbis/nc_gate.h"
 #include "narbis/nc_wear.h"
 #include "narbis/nc_agc.h"
+#include "narbis/nc_agcstep.h"
 #include "narbis/nc_proto_encode.h"
 
 static const char *TAG = "acq_dsp";
@@ -77,6 +78,7 @@ static nc_gate_t s_gate;
 static nc_gate_dcstep_t s_dcstep;      /* fed with the IBI channel's DC */
 static nc_wear_t s_wear;
 static nc_agc_t s_agc;
+static nc_agcstep_t s_step;          /* AGC step compensation          */
 static int8_t s_offdac[2];             /* shadow, see file header       */
 static bool s_prev_gated;
 static bool s_prev_worn;
@@ -98,6 +100,14 @@ static _Atomic uint32_t s_ts_pub = 10000;   /* acq_measured_ts_us()     */
 /* AGC settle blanking (sys_task writes, sample path reads). */
 static portMUX_TYPE s_blank_mux = portMUX_INITIALIZER_UNLOCKED;
 static uint64_t s_blank_until_us;
+
+/* AGC step mailbox (sys_task -> sample path, under s_blank_mux): a GUARD
+ * right before an AGC message's AFE writes, an ARM with the actual
+ * ratios right after them (nc_agcstep.h). An arm not yet taken absorbs
+ * the next one, so no step is ever lost between two samples. */
+static bool s_mb_guard, s_mb_arm;
+static uint64_t s_mb_guard_lo, s_mb_lo, s_mb_hi;
+static int32_t s_mb_r[2];
 
 /* AGC slow tick. */
 static uint32_t s_agc_cnt;
@@ -240,6 +250,11 @@ static void dsp_apply_reset(uint32_t req)
 
     nc_ibi_init(&s_ibi, nom);          /* re-reads the IBI knob block  */
     nc_gate_dcstep_init(&s_dcstep);
+    /* A step published before this reset belongs to the old stream. */
+    nc_agcstep_init(&s_step);
+    portENTER_CRITICAL(&s_blank_mux);
+    s_mb_guard = s_mb_arm = false;
+    portEXIT_CRITICAL(&s_blank_mux);
 
     s_agc_cnt = 0;
     s_agc_period_smp = agc_period_samples();
@@ -328,8 +343,13 @@ static void on_beat(const nc_ibi_rec_t *rec)
         s_ibi_rn = s_ibi_ri = 0;
         return;
     }
-    if (rec->flags & NC_IBIF_ARTIFACT) {
-        return;                        /* sent (flagged), not counted in HR */
+    /* Sent above (flagged) for apps that read the flags; kept out of HR
+     * and off the standard Heart Rate Service, whose RR list has no flag
+     * field (an H10-style consumer would take them as real intervals):
+     * implausible ones, and the first after a gated stretch (its interval
+     * spans the gated time). */
+    if (rec->flags & (NC_IBIF_ARTIFACT | NC_IBIF_GATED_CTX)) {
+        return;
     }
 
     s_ibi_ring[s_ibi_ri] = rec->ibi_ms;
@@ -471,14 +491,77 @@ static void one_hz_tick(void)
     portEXIT_CRITICAL(&s_agg_mux);
 }
 
+void acq_agc_step_guard(uint64_t t_lo_us)
+{
+    portENTER_CRITICAL(&s_blank_mux);
+    if (!s_mb_guard) {
+        s_mb_guard = true;
+        s_mb_guard_lo = t_lo_us;
+    }
+    portEXIT_CRITICAL(&s_blank_mux);
+}
+
+void acq_agc_step_arm(uint64_t t_lo_us, uint64_t t_hi_us, const int32_t r_q16[2])
+{
+    portENTER_CRITICAL(&s_blank_mux);
+    if (s_mb_arm) {
+        if (t_lo_us < s_mb_lo) s_mb_lo = t_lo_us;
+        if (t_hi_us > s_mb_hi) s_mb_hi = t_hi_us;
+        s_mb_r[0] = nc_agcstep_chain_q16(s_mb_r[0], r_q16[0]);
+        s_mb_r[1] = nc_agcstep_chain_q16(s_mb_r[1], r_q16[1]);
+    } else {
+        s_mb_arm = true;
+        s_mb_lo = t_lo_us;
+        s_mb_hi = t_hi_us;
+        s_mb_r[0] = r_q16[0];
+        s_mb_r[1] = r_q16[1];
+    }
+    portEXIT_CRITICAL(&s_blank_mux);
+}
+
+static void step_mailbox_take(void)
+{
+    bool guard, arm;
+    uint64_t glo, lo, hi;
+    int32_t r[2];
+    portENTER_CRITICAL(&s_blank_mux);
+    guard = s_mb_guard;
+    arm = s_mb_arm;
+    glo = s_mb_guard_lo;
+    lo = s_mb_lo;
+    hi = s_mb_hi;
+    r[0] = s_mb_r[0];
+    r[1] = s_mb_r[1];
+    s_mb_guard = s_mb_arm = false;
+    portEXIT_CRITICAL(&s_blank_mux);
+    if (guard) {
+        nc_agcstep_guard(&s_step, glo);
+    }
+    if (arm) {
+        nc_agcstep_arm(&s_step, lo, hi, r);
+    }
+}
+
 static void dsp_process(const nc_ppg_sample_t *s)
 {
     bool amb_sub = nc_knob_get(KNOB_AMB_SUBTRACT) != 0;
     int32_t xi = amb_sub ? s->ir - s->amb : s->ir;
     int32_t xr = amb_sub ? s->red - s->amb : s->red;
+    int sel = (nc_knob_get(KNOB_IBI_CHANNEL) != 0) ? 1 : 0;
 
-    /* Raw + ambient DC for the AGC (|x| < 2^22, so x*16 fits int32). */
-    if (!s_raw_dc_primed) {
+    /* DSP chains through the AGC step compensator: across an LED / gain
+     * step the chain input is continued for the straddling samples, then
+     * the chain and the beat detector are rescaled (nc_agcstep.h). */
+    step_mailbox_take();
+    const int32_t x[2] = { xi, xr };
+    nc_dsp_out_t o[2];
+    const nc_agcstep_act_t step_act =
+        nc_agcstep_run(&s_step, s_ch, &s_ibi, sel, &s_dcstep, s->t_us, x, o);
+
+    /* Raw + ambient DC for the AGC (|x| < 2^22, so x*16 fits int32).
+     * Re-primed on the first sample after a step: the optimizer's next
+     * look must not see a blend of the old and new levels. */
+    if (!s_raw_dc_primed || step_act == NC_AGCSTEP_APPLY) {
         s_raw_dc_q4[0] = s->ir * 16;
         s_raw_dc_q4[1] = s->red * 16;
         s_amb_dc_q4 = s->amb * 16;
@@ -487,12 +570,6 @@ static void dsp_process(const nc_ppg_sample_t *s)
     s_raw_dc_q4[0] += (s->ir * 16 - s_raw_dc_q4[0]) >> 5;
     s_raw_dc_q4[1] += (s->red * 16 - s_raw_dc_q4[1]) >> 5;
     s_amb_dc_q4 += (s->amb * 16 - s_amb_dc_q4) >> 5;
-
-    nc_dsp_out_t o[2];
-    nc_dsp_run(&s_ch[0], xi, &o[0]);
-    nc_dsp_run(&s_ch[1], xr, &o[1]);
-
-    int sel = (nc_knob_get(KNOB_IBI_CHANNEL) != 0) ? 1 : 0;
 
     /* Saturation on RAW values (pre-subtract): the rail lives there. */
     int32_t thr = acq_sat_thr_counts();
@@ -518,8 +595,11 @@ static void dsp_process(const nc_ppg_sample_t *s)
     /* amp_collapse is an IBI-side input not wired in v1 (task scope);
      * gate reason COLLAPSE stays available on the wire. */
     nc_gate_in_t gin;
+    /* With step compensation the settle window is annotation only: the
+     * chain never sees the step, so gating it would only cost beats. */
+    const bool settle_gate = settling && nc_knob_get(KNOB_AGC_STEP_COMP) == 0;
     nc_gate_build_input(&gin, &s_dcstep, acc_e,
-                        o[sel].dc, sat_ir || sat_red, false, settling,
+                        o[sel].dc, sat_ir || sat_red, false, settle_gate,
                         wear_off);
     uint8_t reason = 0;
     bool gated = nc_gate_update(&s_gate, &gin, (uint32_t)(s->t_us / 1000u),

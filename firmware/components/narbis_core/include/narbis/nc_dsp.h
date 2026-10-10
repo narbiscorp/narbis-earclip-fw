@@ -57,3 +57,21 @@ void nc_dsp_init(nc_chan_dsp_t *d, nc_rate_t rate);
 /* One sample through the whole chain. x: 24-bit sign-extended
  * (|x| < 2^23; ambient already subtracted by the caller if enabled). */
 void nc_dsp_run(nc_chan_dsp_t *d, int32_t x, nc_dsp_out_t *out);
+
+/* AGC step compensation (nc_agcstep.h). Not part of the golden-vector
+ * contract: these only rewrite state between samples, never nc_dsp_run.
+ *
+ * nc_dsp_scale: the input just changed scale by r (Q16, 1/8..8: an LED
+ * or TIA gain step). Every amplitude-carrying state (DC tracker,
+ * biquads) is multiplied by r, as if the whole history had been at the
+ * new scale.
+ *
+ * nc_dsp_rebase: put the DC tracker where the next nc_dsp_run(x) keeps
+ * hp continuous (hp ~= hp_target): whatever the scale model got wrong,
+ * plus any offset-DAC step, lands in the DC and not in the pulse.
+ *
+ * nc_dsp_reprime: an unscalable step (from LEDs off, or a ratio outside
+ * 1/8..8): DC tracker on x, filter states cleared. */
+void nc_dsp_scale(nc_chan_dsp_t *d, int32_t r_q16);
+void nc_dsp_rebase(nc_chan_dsp_t *d, int32_t x, int32_t hp_target);
+void nc_dsp_reprime(nc_chan_dsp_t *d, int32_t x);

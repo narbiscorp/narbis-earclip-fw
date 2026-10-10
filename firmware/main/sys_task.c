@@ -48,6 +48,8 @@
 #include "test_ops.h"
 
 #include "narbis/nc_acq_policy.h"
+#include "narbis/nc_agc.h"
+#include "narbis/nc_agcstep.h"
 #include "narbis/nc_button.h"
 #include "narbis/nc_control.h"
 #include "narbis/nc_knobs.h"
@@ -728,6 +730,17 @@ static void handle_agc(const sys_msg_t *m)
     if (s_agc_frozen || !acq_ppg_running()) {
         return;   /* frozen raced a decision in flight, or stream gone */
     }
+    /* AGC step compensation (nc_agcstep.h): tell the sample path how this
+     * message rescales each channel, bracketing the AFE writes in time.
+     * Ratios multiply over the actions; an LED from or to 0 makes one
+     * unknown (the chain is re-primed instead). Offset-DAC steps scale
+     * nothing: the DC rebase absorbs them. */
+    const bool comp = nc_knob_get(KNOB_AGC_STEP_COMP) != 0;
+    int32_t ratio[2] = { NC_AGCSTEP_ONE, NC_AGCSTEP_ONE };
+    const uint64_t t_lo = (uint64_t)esp_timer_get_time();
+    if (comp) {
+        acq_agc_step_guard(t_lo);
+    }
     for (uint8_t i = 0; i < m->u.agc.count && i < 4; i++) {
         const nc_agc_act_t *a = &m->u.agc.acts[i];
         bool ok = false;
@@ -741,6 +754,9 @@ static void handle_agc(const sys_msg_t *m)
             const uint8_t tgt_red = (a->chan == NC_AGC_CH_RED) ? a->led_ma : old_red;
             ok = afe4404_set_led_ma(tgt_ir, tgt_red) == ESP_OK;
             if (ok) {
+                const int c = (a->chan == NC_AGC_CH_IR) ? 0 : 1;
+                ratio[c] = nc_agcstep_chain_q16(ratio[c], nc_agcstep_ratio_q16(
+                    a->led_ma, c == 0 ? old_ir : old_red));
                 const uint8_t d[5] = {
                     a->chan,
                     (a->chan == NC_AGC_CH_IR) ? old_ir : old_red,
@@ -754,6 +770,10 @@ static void handle_agc(const sys_msg_t *m)
             const uint8_t old_rf = afe4404_cur_rf();
             ok = afe4404_set_tia(a->rf_code, afe4404_cur_cf()) == ESP_OK;
             if (ok) {
+                const int32_t g = nc_agcstep_ratio_q16(
+                    (uint32_t)nc_agc_rf_kohm(a->rf_code), (uint32_t)nc_agc_rf_kohm(old_rf));
+                ratio[0] = nc_agcstep_chain_q16(ratio[0], g);
+                ratio[1] = nc_agcstep_chain_q16(ratio[1], g);
                 const uint8_t d[5] = { 0xFF, 0, 0, old_rf, a->rf_code };
                 ev_emit(NC_EV_AGC_STEP, d, 5);
             }
@@ -782,6 +802,11 @@ static void handle_agc(const sys_msg_t *m)
         } else if (a->kind != NC_AGC_NONE) {
             ESP_LOGW(TAG, "AGC actuation failed (kind %d)", (int)a->kind);
         }
+    }
+    if (comp) {
+        /* Always arm, even if every write failed (ratio 1): it releases
+         * the guard at once instead of after the hold cap. */
+        acq_agc_step_arm(t_lo, (uint64_t)esp_timer_get_time(), ratio);
     }
 }
 
@@ -1080,6 +1105,7 @@ static void handle_tick(void)
         }
     }
 
+    ble_tx_power_poll();   /* a live ble_tx_dbm edit (knob) */
     demand();
     status_sync(true);   /* the 1 Hz STATUS heartbeat */
 }

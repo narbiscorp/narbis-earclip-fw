@@ -117,6 +117,12 @@ void nc_gate_dcstep_init(nc_gate_dcstep_t *d)
     memset(d, 0, sizeof(*d));
 }
 
+void nc_gate_dcstep_rebase(nc_gate_dcstep_t *d, int32_t dc, int32_t r_q16)
+{
+    d->prev_dc = dc;
+    d->ema_abs_q4 = nc_sat32(nc_mul_q16(d->ema_abs_q4, r_q16));
+}
+
 bool nc_gate_dcstep_feed(nc_gate_dcstep_t *d, int32_t dc)
 {
     d->nsamp++;

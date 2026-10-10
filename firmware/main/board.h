@@ -47,6 +47,12 @@
 #define PIN_I2C_SDA         22  /* 4.7k pull-up */
 #define PIN_I2C_SCL         23  /* 4.7k pull-up */
 /* GPIO0 is a no-connect on this board. Never drive or read it. */
+/* XIAO-internal RF switch (FM8625H; Seeed schematic v1.0: "RF Switch
+ * Power 0: ON 1: OFF", "Port Selection 0: RF1 1: RF2"). GPIO3 low powers
+ * it, GPIO14 low selects the onboard ceramic antenna (the U.FL port is
+ * unused here). Not on the castellated pads — module-internal pins. */
+#define PIN_RF_SW_PWR       3
+#define PIN_RF_SW_SEL       14
 
 /* ------------------------------------------------------------------ */
 /* I2C                                                                 */

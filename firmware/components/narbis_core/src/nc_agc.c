@@ -43,6 +43,11 @@ int nc_agc_rf_rank(uint8_t rf_code)
     return -1;
 }
 
+int32_t nc_agc_rf_kohm(uint8_t rf_code)
+{
+    return (rf_code < 8) ? rf_kohm[rf_code] : 0;
+}
+
 uint8_t nc_agc_rf_code_at(int rank)
 {
     if (rank < 0) rank = 0;

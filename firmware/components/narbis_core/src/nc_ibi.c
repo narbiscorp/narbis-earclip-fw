@@ -4,6 +4,7 @@
  */
 #include "narbis/nc_ibi.h"
 #include "narbis/nc_knobs.h"
+#include "narbis/nc_types.h"
 #include <string.h>
 
 #define Q31_ONE (1LL << 31)
@@ -374,4 +375,47 @@ bool nc_ibi_update(nc_ibi_t *s, int32_t bp, uint64_t t_us, bool gated,
     }
     s->ssf_prev = ssf;
     return emitted;
+}
+
+/* ------------------------------------------------------------------ */
+/* AGC step compensation (nc_agcstep.h)                                */
+/* ------------------------------------------------------------------ */
+static int32_t scale_i32(int32_t v, int32_t r_q16)
+{
+    return nc_sat32(nc_mul_q16(v, r_q16));
+}
+
+void nc_ibi_scale(nc_ibi_t *s, int32_t r_q16)
+{
+    s->bp_prev = scale_i32(s->bp_prev, r_q16);
+    for (int i = 0; i < NC_IBI_SSF_MAX; i++) {
+        s->ring[i] = scale_i32(s->ring[i], r_q16);
+    }
+    /* Re-sum rather than scale the sum: the ring entries were rounded
+     * one by one, and the O(1) update relies on sum == sum(ring). */
+    int64_t sum = 0;
+    for (int i = 0; i < s->ssf_win; i++) {
+        sum += s->ring[i];
+    }
+    s->ssf_sum = sum;
+    s->ssf_prev = nc_mul_q16(s->ssf_prev, r_q16);
+    s->peak_track = nc_mul_q16(s->peak_track, r_q16);
+    s->y0 = nc_mul_q16(s->y0, r_q16);
+    s->ym1 = nc_mul_q16(s->ym1, r_q16);
+    s->yp1 = nc_mul_q16(s->yp1, r_q16);
+    s->amp_ema = nc_mul_q16(s->amp_ema, r_q16);
+}
+
+void nc_ibi_restart_amp(nc_ibi_t *s)
+{
+    memset(s->ring, 0, sizeof s->ring);
+    s->ring_idx = 0;
+    s->ssf_sum = 0;
+    s->ssf_prev = 0;
+    s->have_bp = false;
+    s->bp_prev = 0;
+    s->peak_track = 0;
+    s->in_peak = false;
+    s->want_next = false;
+    s->amp_ema = 0;
 }

@@ -137,3 +137,14 @@ void nc_ibi_set_ts(nc_ibi_t *s, uint32_t ts_us_measured);
  * capture timestamp; gated is the artifact-gate flag for this sample. */
 bool nc_ibi_update(nc_ibi_t *s, int32_t bp, uint64_t t_us, bool gated,
                    nc_ibi_rec_t *out);
+
+/* AGC step compensation (nc_agcstep.h). nc_ibi_scale: the band-passed
+ * input just changed scale by r (Q16, 1/8..8) — the derivative ring, SSF,
+ * threshold tracker, peak capture and amplitude EMA follow, so the
+ * threshold stays where the pulse is and no beat is lost or invented.
+ * nc_ibi_restart_amp: an unscalable step — amplitude state cleared (the
+ * threshold re-learns from the floor within a beat or two); the beat
+ * clock and the rate references are kept, so the next interval is
+ * measured from the last real beat. */
+void nc_ibi_scale(nc_ibi_t *s, int32_t r_q16);
+void nc_ibi_restart_amp(nc_ibi_t *s);

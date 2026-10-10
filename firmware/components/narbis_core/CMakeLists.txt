@@ -9,6 +9,7 @@ idf_component_register(
         src/crc32.c
         src/nc_acq_policy.c
         src/nc_agc.c
+        src/nc_agcstep.c
         src/nc_batt_curve.c
         src/nc_button.c
         src/nc_dsp.c

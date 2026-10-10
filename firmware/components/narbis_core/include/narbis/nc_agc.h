@@ -230,3 +230,6 @@ bool nc_agc_take_change(nc_agc_t *s);
  * rank: 0 (10k) .. 7 (2M); nc_agc_rf_rank returns -1 for codes > 7. */
 int nc_agc_rf_rank(uint8_t rf_code);
 uint8_t nc_agc_rf_code_at(int rank);   /* rank clamped to 0..7 */
+/* TIA feedback resistor of an RF code in kOhm (the signal scales with it);
+ * 0 for an invalid code. */
+int32_t nc_agc_rf_kohm(uint8_t rf_code);

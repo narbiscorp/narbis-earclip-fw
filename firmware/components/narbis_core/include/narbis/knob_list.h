@@ -39,6 +39,10 @@ X(IND_BREATH_MS,       0x0009, "ind_breath_ms",         NC_KNOB_U16,    600,   5
 /*   a central that subscribes to nothing of ours this long is dropped (phone /   */ \
 /*   PC background reconnects to a bonded clip); OTA exempt; 0 = never.           */ \
 X(IDLE_KICK_S,         0x000A, "idle_kick_s",           NC_KNOB_U16,      0,    600,     15, "s",     KPL) \
+/*   BLE transmit power, advertising + connections (C6: -15..+20 dBm in 3 dB    */ \
+/*   steps, +20 the top; values between round down). +20 for range (user,       */ \
+/*   2026-10-09; it was the IDF default +9); lower to save battery.              */ \
+X(BLE_TX_DBM,          0x000B, "ble_tx_dbm",            NC_KNOB_I32,    -15,     20,     20, "dBm",   KPL) \
 /* -- button (0x01xx) --------------------------------------------------------------- */ \
 X(PRESS_LONG_MS,       0x0101, "press_long_ms",         NC_KNOB_U16,    500,   5000,   1500, "ms",    KPL) \
 X(PRESS_DOUBLE_MS,     0x0102, "press_double_ms",       NC_KNOB_U16,    200,   1000,    400, "ms",    KPL) \
@@ -90,6 +94,10 @@ X(AGC_PREF_MA_RED,     0x0417, "agc_pref_ma_red",       NC_KNOB_U8,       1,    
 /*   agc_mode 2, LOCKED: raw DC beyond target +- this for agc_reacq_drift_ms      */ \
 /*   re-runs the optimizer (beats or not), never sooner than agc_reacq_min_s.     */ \
 X(AGC_DRIFT_BAND,      0x0418, "agc_drift_band",        NC_KNOB_I32,  50000, 1000000, 500000, "cnt", KPL) \
+/*   AGC step compensation (nc_agcstep.h): rescale the DSP + beat chain across  */ \
+/*   every LED / gain step instead of gating the settle window, so beats keep   */ \
+/*   coming through a re-acquire. 0 = the old settle gating (A/B).              */ \
+X(AGC_STEP_COMP,       0x0419, "agc_step_comp",         NC_KNOB_BOOL,     0,      1,      1, "",      KPL) \
 /* -- DSP (0x05xx) ------------------------------------------------------------------ */ \
 X(HP_FC_X100,          0x0501, "hp_fc_x100",            NC_KNOB_U16,     10,    200,     50, "cHz",   KPS) \
 X(BP_LO_X100,          0x0502, "bp_lo_x100",            NC_KNOB_U16,     20,    200,     50, "cHz",   KPS) \

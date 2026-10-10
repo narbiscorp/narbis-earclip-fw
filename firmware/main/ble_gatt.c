@@ -56,6 +56,7 @@
 #include "freertos/task.h"
 
 #include "esp_app_desc.h"
+#include "esp_bt.h"           /* esp_ble_tx_power_set_enhanced */
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -533,6 +534,7 @@ static int chr_access(uint16_t conn_handle, uint16_t attr_handle,
 /* Advertising                                                         */
 /* ------------------------------------------------------------------ */
 static int gap_event_cb(struct ble_gap_event *event, void *arg);
+static void tx_power_apply(bool force);
 
 static void adv_start(bool fast)
 {
@@ -717,6 +719,7 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         esp_timer_stop(s_adv_tmr);
         ESP_LOGI(TAG, "connected (handle %u, peer %s)", (unsigned)s_conn,
                  s_peer_was_bonded ? "bonded" : "new");
+        tx_power_apply(true);          /* the new link at ble_tx_dbm too */
 
         /* Link tuning (2M PHY + DLE + interval policy) is DEFERRED by
          * LINK_TUNE_DELAY_US instead of running here. Issuing three
@@ -834,6 +837,61 @@ static void on_reset(int reason)
     ESP_LOGE(TAG, "host reset, reason %d", reason);
 }
 
+/* ------------------------------------------------------------------ */
+/* Transmit power (ble_tx_dbm knob)                                    */
+/* ------------------------------------------------------------------ */
+/* The C6 controller takes 3 dB steps from -15 to +18 dBm plus +20 (the
+ * top); a value in between rounds down. Default +20 for range (user,
+ * 2026-10-09) — it ran at the IDF default +9 before v0.3.0-35. */
+static int32_t s_tx_dbm_applied = INT32_MIN;
+
+static esp_power_level_t tx_level(int32_t dbm)
+{
+    if (dbm >= 20) {
+        return ESP_PWR_LVL_P20;
+    }
+    if (dbm < -15) {
+        dbm = -15;
+    }
+    const int32_t steps = (dbm >= 0) ? dbm / 3 : -((2 - dbm) / 3);   /* floor */
+    int32_t lvl = (int32_t)ESP_PWR_LVL_N0 + steps;
+    if (lvl < (int32_t)ESP_PWR_LVL_N15) lvl = ESP_PWR_LVL_N15;
+    if (lvl > (int32_t)ESP_PWR_LVL_P18) lvl = ESP_PWR_LVL_P18;
+    return (esp_power_level_t)lvl;
+}
+
+/* Default (connections inherit it), advertising, and the live link. */
+static void tx_power_apply(bool force)
+{
+    const int32_t dbm = nc_knob_get(KNOB_BLE_TX_DBM);
+    if (!force && dbm == s_tx_dbm_applied) {
+        return;
+    }
+    const esp_power_level_t lvl = tx_level(dbm);
+    esp_err_t err = esp_ble_tx_power_set_enhanced(ESP_BLE_ENHANCED_PWR_TYPE_DEFAULT, 0, lvl);
+    if (err == ESP_OK) {
+        err = esp_ble_tx_power_set_enhanced(ESP_BLE_ENHANCED_PWR_TYPE_ADV, 0, lvl);
+    }
+    if (err == ESP_OK && s_conn != BLE_HS_CONN_HANDLE_NONE) {
+        err = esp_ble_tx_power_set_enhanced(ESP_BLE_ENHANCED_PWR_TYPE_CONN, s_conn, lvl);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "tx power %ld dBm: %s", (long)dbm, esp_err_to_name(err));
+        return;
+    }
+    if (dbm != s_tx_dbm_applied) {
+        ESP_LOGI(TAG, "tx power %ld dBm (controller level %d)", (long)dbm, (int)lvl);
+    }
+    s_tx_dbm_applied = dbm;
+}
+
+void ble_tx_power_poll(void)
+{
+    if (s_synced) {
+        tx_power_apply(false);
+    }
+}
+
 static void on_sync(void)
 {
     int rc = ble_hs_util_ensure_addr(0);
@@ -847,6 +905,7 @@ static void on_sync(void)
         return;
     }
     s_synced = true;
+    tx_power_apply(true);          /* before the first advertisement */
     adv_start(true);               /* fast for 30 s after boot */
 }
 

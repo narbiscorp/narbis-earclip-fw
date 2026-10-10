@@ -31,6 +31,15 @@ uint32_t acq_measured_ts_us(void);
  * document the choice). */
 void acq_set_blank_until(uint64_t t_us);
 
+/* AGC step compensation (narbis/nc_agcstep.h), sys_task -> sample path.
+ * guard: right BEFORE one AGC message's AFE writes (t_lo = now), so a
+ * sample read between the writes and the arm is held, not mixed in.
+ * arm: right AFTER them (t_hi = now) with each channel's actual scale
+ * change, Q16 (LED new/old, TIA Rf new/old, multiplied; 0 = unknown).
+ * Only when the agc_step_comp knob is on. */
+void acq_agc_step_guard(uint64_t t_lo_us);
+void acq_agc_step_arm(uint64_t t_lo_us, uint64_t t_hi_us, const int32_t r_q16[2]);
+
 /* Batch stream flag bits owned by sys_task (USB present, wear-off):
  * OR-ed into every outgoing PPG batch's flags field. */
 void acq_set_extra_ppg_flags(uint8_t set_mask, uint8_t clear_mask);

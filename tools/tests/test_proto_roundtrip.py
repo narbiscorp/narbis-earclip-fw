@@ -402,8 +402,9 @@ def test_knob_discover_chunk_roundtrip():
     # (0x0414..0x0415), +4 wear fast-off knobs (0x0905..0x0908),
     # +2 standby (0x0008..0x0009), +3 ear posture (0x0804..0x0806),
     # +1 idle kick (0x000A), +2 plausibility (0x060A..0x060B),
-    # +3 optimizer (0x0416..0x0418)
-    assert chunk.total == 86
+    # +3 optimizer (0x0416..0x0418), +1 BLE TX power (0x000B),
+    # +1 AGC step compensation (0x0419)
+    assert chunk.total == 88
     assert len(chunk.records) == 6
     wire = P.build_knob_discover_chunk(chunk)
     assert len(wire) == 225 <= P.ATT_PAYLOAD_MAX

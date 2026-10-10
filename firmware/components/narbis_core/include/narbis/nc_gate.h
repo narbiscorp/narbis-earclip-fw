@@ -95,6 +95,13 @@ void nc_gate_dcstep_init(nc_gate_dcstep_t *d);
 /* Feed the per-sample DC-tracker output; returns true on a step. */
 bool nc_gate_dcstep_feed(nc_gate_dcstep_t *d, int32_t dc);
 
+/* AGC step compensation (nc_agcstep.h): the DC tracker was just moved
+ * to the new level and the signal rescaled by r (Q16; 65536 for an
+ * offset-only step). Continue from dc with the |ddc| EMA rescaled, so
+ * the compensated step is not a DC step and the new scale's ordinary
+ * wander is judged against a matching baseline. */
+void nc_gate_dcstep_rebase(nc_gate_dcstep_t *d, int32_t dc, int32_t r_q16);
+
 /* Assemble nc_gate_in_t from the raw signals, running the DC-step
  * detector on `dc` as part of it. */
 void nc_gate_build_input(nc_gate_in_t *in, nc_gate_dcstep_t *ds,

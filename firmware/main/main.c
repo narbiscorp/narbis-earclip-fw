@@ -59,6 +59,24 @@ extern bool power_ble_started;
 /* sys_task.c: LOWBATT boot-refusal flag (set pre-scheduling). */
 extern void sys_task_set_boot_lowbatt(void);
 
+/* The XIAO's RF switch (board.h PIN_RF_SW_*): powered, onboard ceramic
+ * antenna. Before v0.3.0-35 nothing drove these pins, so the switch's
+ * power depended on the module's resistor on GPIO3 — Seeed's own Arduino
+ * core drives both at boot, exactly like this. Light sleep keeps them
+ * driven; deep sleep releases them to the module's own resistor. */
+static void rf_switch_init(void)
+{
+    const gpio_config_t io = {
+        .pin_bit_mask = (1ULL << PIN_RF_SW_PWR) | (1ULL << PIN_RF_SW_SEL),
+        .mode = GPIO_MODE_OUTPUT,
+    };
+    gpio_config(&io);
+    gpio_set_level(PIN_RF_SW_PWR, 0);
+    gpio_set_level(PIN_RF_SW_SEL, 0);
+    gpio_sleep_sel_dis(PIN_RF_SW_PWR);
+    gpio_sleep_sel_dis(PIN_RF_SW_SEL);
+}
+
 static const char *boot_cause_str(pwr_boot_cause_t c)
 {
     switch (c) {
@@ -97,6 +115,7 @@ void app_main(void)
 #endif
     diag_init();
     ESP_ERROR_CHECK(power_init());
+    rf_switch_init();         /* before BLE ever keys the radio */
 
     const pwr_boot_cause_t cause = power_boot_cause();
     bool batt_ready = false;

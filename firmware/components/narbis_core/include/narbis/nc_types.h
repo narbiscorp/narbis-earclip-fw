@@ -154,6 +154,14 @@ static inline int32_t nc_sat32(int64_t v)
     return (int32_t)v;
 }
 
+/* v * r_q16 / 2^16 without overflow for |v| < 2^56 and 0 <= r_q16 <= 2^19
+ * (arithmetic >> splits v into a floor high part and a non-negative low
+ * part, so negative v round-trip exactly too). AGC step rescaling. */
+static inline int64_t nc_mul_q16(int64_t v, int32_t r_q16)
+{
+    return (v >> 16) * r_q16 + (((v & 0xFFFF) * r_q16) >> 16);
+}
+
 /* (a * b) >> 31 with int64 intermediate — Q31 multiply */
 static inline int32_t nc_mul_q31(int32_t a, int32_t b)
 {
