@@ -36,6 +36,20 @@
  *    artifact-era energy cannot fire the detector (<= one-window
  *    warm-up). The first record emitted after a gated span carries
  *    NC_IBIF_GATED_CTX.
+ *  - Plausibility (ibi_art_en, proto 1.3): an interval more than
+ *    ibi_art_tol_pct off BOTH the median of the last 5 accepted intervals
+ *    AND the last accepted one is flagged NC_IBIF_ARTIFACT, confidence
+ *    capped at NC_IBI_ART_CONF_MAX. It is still emitted — flagged, never
+ *    dropped. Requiring both references is what keeps paced breathing
+ *    clean: respiratory swings of +-25 % move beat to beat in small steps,
+ *    which a lagging median alone would flag at every peak (synthetic
+ *    6 /min RSA: median-only 60-78 % false flags, both-references 0 %).
+ *    On the two first guided H10 recordings (2026-10-09) at 15 %: 77 % of
+ *    the junk intervals flagged, 1 of 324 good rest / foot-tap beats.
+ *    Four consecutive flagged intervals that agree with each other (within
+ *    tol) are a genuine rate change: they become the new reference. The
+ *    reference survives gating (heart rate does not jump during a few
+ *    seconds of motion) and resets with FIRST_AFTER_GAP.
  */
 #pragma once
 #include <stdint.h>
@@ -45,6 +59,26 @@
 /* SSF ring capacity: ssf_win_ms max (200 ms) at 500 sps = 100 entries,
  * headroom for measured-period undershoot. */
 #define NC_IBI_SSF_MAX 128
+
+#define NC_IBI_ART_REF      5    /* accepted intervals in the median       */
+#define NC_IBI_ART_ANCHOR   4    /* agreeing flagged intervals = new rate  */
+#define NC_IBI_ART_CONF_MAX 20   /* confidence cap on an ARTIFACT record   */
+
+/* Plausibility reference (see the contract above). Exposed for tests. */
+typedef struct {
+    uint16_t ref[NC_IBI_ART_REF];  /* last accepted intervals, ring */
+    uint8_t  n;                    /* valid entries                 */
+    uint8_t  idx;                  /* next write                    */
+    uint16_t last;                 /* last accepted interval        */
+    uint16_t run[NC_IBI_ART_ANCHOR];  /* consecutive flagged intervals */
+    uint8_t  run_n;
+} nc_ibi_plaus_t;
+
+void nc_ibi_plaus_reset(nc_ibi_plaus_t *p);
+
+/* true = ARTIFACT. tol_pct 5..50. The first 3 intervals after a reset are
+ * accepted unchecked (warm-up). */
+bool nc_ibi_plaus_check(nc_ibi_plaus_t *p, uint16_t ibi_ms, uint8_t tol_pct);
 
 typedef struct {
     /* measured timing + derived config (nc_ibi_init / nc_ibi_set_ts) */
@@ -58,6 +92,9 @@ typedef struct {
     uint16_t k_ibi_min_ms, k_ibi_max_ms;
     int32_t  k_thr_frac_x100, k_thr_min;
     bool     k_interp_en;
+    bool     k_art_en;
+    uint8_t  k_art_tol_pct;
+    nc_ibi_plaus_t plaus;
 
     /* derivative + slope-sum */
     int32_t  bp_prev;

@@ -2,7 +2,9 @@
  * t_agc.c — AGC policy engine against a simulated optical plant.
  *
  * Plant model (per task spec):
- *   dc[c] = k[c] * led_ma[c] * rf_kohm(rf)/100 + offdac[c] * dacg[c]
+ *   dc[c] = (k[c] * led_ma[c] + amb) * rf_kohm(rf)/100 + offdac[c] * dacg[c]
+ * (amb: ambient light, counts at 100k, shared by both channels; 0 unless a
+ * test sets it — the OPTIMIZER suites do, and read it back as amb_dc).
  * with the offset-DAC gain dacg carrying a ±20% error vs the 10000
  * counts/code nominal (8000 / 12000 in the tests below) — the policy
  * steps blindly, so convergence must not depend on the exact value.
@@ -36,11 +38,12 @@ typedef struct {
     bool     frozen;
     int32_t  noise[2];   /* additive dc noise for this read */
     bool     off_ear;    /* wear detector verdict fed to the AGC */
+    int32_t  amb;        /* ambient, counts at 100k (OPTIMIZER suites) */
 } plant_t;
 
 static int64_t plant_ideal(const plant_t *p, int c)
 {
-    return ((int64_t)p->k[c] * p->led[c] * rf_kohm[p->rf]) / 100 +
+    return ((int64_t)p->k[c] * p->led[c] + p->amb) * rf_kohm[p->rf] / 100 +
            (int64_t)p->od[c] * p->dacg[c];
 }
 
@@ -59,6 +62,7 @@ static void plant_read(const plant_t *p, nc_agc_in_t *in)
     in->now_ms = p->now;
     in->frozen = p->frozen;
     in->off_ear = p->off_ear;
+    in->amb_dc = (int32_t)(((int64_t)p->amb * rf_kohm[p->rf]) / 100);
 }
 
 static bool in_band(const plant_t *p, int c)
@@ -130,6 +134,17 @@ static void knobs_ladder(void)
 {
     nc_knobs_init();
     CHECK_EQ(nc_knob_set_id(0x040D, 0), NC_ST_OK);   /* agc_mode */
+}
+
+/* The acquire -> lock suites below were written for agc_mode 1 (lock with
+ * the ladder) and its original 30 s re-acquire spacing; agc_mode 2 (the
+ * OPTIMIZER, now the default) and the 180 s spacing have their own suites
+ * at the end. */
+static void knobs_lock1(void)
+{
+    nc_knobs_init();
+    CHECK_EQ(nc_knob_set_id(0x040D, 1), NC_ST_OK);   /* agc_mode */
+    CHECK_EQ(nc_knob_set_id(0x0413, 30), NC_ST_OK);  /* agc_reacq_min_s */
 }
 
 /* One evaluate at the current plant time, then advance dt (the real
@@ -495,7 +510,7 @@ static void test_rails_and_bad_rf(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Acquire -> lock (agc_mode = 1, the default)                         */
+/* Acquire -> lock (agc_mode = 1: lock with the ladder)                         */
 /* ------------------------------------------------------------------ */
 
 /* Converged plant (test_converge_from_dark end state): IR 750000,
@@ -523,7 +538,7 @@ static void lock_stable(nc_agc_t *s, plant_t *p)
 static void test_init_edge(void)
 {
     nc_knobs_init();
-    CHECK_EQ(nc_knob_get(KNOB_AGC_MODE), 1);          /* lock is the default */
+    CHECK_EQ(nc_knob_get(KNOB_AGC_MODE), 2);          /* OPTIMIZER is the default */
     nc_agc_t s;
     nc_agc_init(&s);
     CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);
@@ -535,7 +550,7 @@ static void test_init_edge(void)
 
 static void test_lock_on_beats(void)
 {
-    nc_knobs_init();
+    knobs_lock1();
     nc_agc_t s;
     nc_agc_init(&s);
     (void)nc_agc_take_change(&s);
@@ -573,7 +588,7 @@ static void test_lock_on_beats(void)
 
 static void test_lock_on_stable(void)
 {
-    nc_knobs_init();
+    knobs_lock1();
     nc_agc_t s;
     nc_agc_init(&s);
     (void)nc_agc_take_change(&s);
@@ -583,7 +598,7 @@ static void test_lock_on_stable(void)
 
 static void test_unclean_beats_do_not_lock(void)
 {
-    nc_knobs_init();
+    knobs_lock1();
     CHECK_EQ(nc_knob_set_id(0x040F, 60000), NC_ST_OK); /* keep STABLE away */
     nc_agc_t s;
     nc_agc_init(&s);
@@ -613,7 +628,7 @@ static void test_unclean_beats_do_not_lock(void)
 
 static void test_beats_need_lock_band(void)
 {
-    nc_knobs_init();
+    knobs_lock1();
     CHECK_EQ(nc_knob_set_id(0x040F, 60000), NC_ST_OK);
     nc_agc_t s;
     nc_agc_init(&s);
@@ -640,7 +655,7 @@ static void test_beats_need_lock_band(void)
 
 static void test_reacquire_on_saturation(void)
 {
-    nc_knobs_init();
+    knobs_lock1();
     nc_agc_t s;
     nc_agc_init(&s);
     (void)nc_agc_take_change(&s);
@@ -670,7 +685,7 @@ static void test_reacquire_on_saturation(void)
 
 static void test_transient_saturation_ignored(void)
 {
-    nc_knobs_init();
+    knobs_lock1();
     nc_agc_t s;
     nc_agc_init(&s);
     plant_t p = converged_plant();
@@ -692,7 +707,7 @@ static void test_transient_saturation_ignored(void)
 
 static void test_drift_reacquire_waits_for_beats_to_stop(void)
 {
-    nc_knobs_init();
+    knobs_lock1();
     nc_agc_t s;
     nc_agc_init(&s);
     plant_t p = converged_plant();
@@ -724,7 +739,7 @@ static void test_drift_reacquire_waits_for_beats_to_stop(void)
 
 static void test_freeze_unfreeze_edges(void)
 {
-    nc_knobs_init();
+    knobs_lock1();
     nc_agc_t s;
     nc_agc_init(&s);
     (void)nc_agc_take_change(&s);
@@ -758,7 +773,7 @@ static void test_freeze_unfreeze_edges(void)
 
 static void test_reacquire_api_and_mode_switch(void)
 {
-    nc_knobs_init();
+    knobs_lock1();
     nc_agc_t s;
     nc_agc_init(&s);
     plant_t p = converged_plant();
@@ -795,7 +810,7 @@ static void test_reacquire_api_and_mode_switch(void)
  * ordinary 3 s SAT rule takes over. */
 static void test_offear_hold_keeps_lock(void)
 {
-    nc_knobs_init();
+    knobs_lock1();
     nc_agc_t s;
     nc_agc_init(&s);
     plant_t p = converged_plant();
@@ -836,7 +851,7 @@ static void test_offear_hold_keeps_lock(void)
     CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);
 
     /* agc_offear_hold_s = 0 disables the hold: plain SAT timing. */
-    nc_knobs_init();
+    knobs_lock1();
     CHECK_EQ(nc_knob_set_id(0x0414, 0), NC_ST_OK);
     nc_agc_init(&s);
     p = converged_plant();
@@ -847,7 +862,7 @@ static void test_offear_hold_keeps_lock(void)
     for (int i = 0; i < 6; i++) CHECK_EQ(drive_dt(&s, &p, acts, 500), 0);
     CHECK(drive_dt(&s, &p, acts, 500) > 0);           /* 3 s after the rail */
     CHECK_EQ(s.reason, NC_AGC_RSN_SAT);
-    nc_knobs_init();
+    knobs_lock1();
 }
 
 /* The hold needs a lock in THIS stream: a stream that starts off-ear (or
@@ -855,7 +870,7 @@ static void test_offear_hold_keeps_lock(void)
  * when an earlier stream locked. */
 static void test_offear_hold_needs_a_lock_this_stream(void)
 {
-    nc_knobs_init();
+    knobs_lock1();
     nc_agc_t s;
     nc_agc_init(&s);
     nc_agc_act_t acts[4];
@@ -879,7 +894,7 @@ static void test_offear_hold_needs_a_lock_this_stream(void)
  * of climbing from wherever the empty clip left them. */
 static void test_putback_restores_lock_settings(void)
 {
-    nc_knobs_init();
+    knobs_lock1();
     nc_agc_t s;
     nc_agc_init(&s);
     nc_agc_act_t acts[4];
@@ -949,7 +964,7 @@ static int count_kind(const nc_agc_act_t *a, int n, nc_agc_kind_t kind)
  * else and never locks. Worn lifts the cap. */
 static void test_probe_caps_leds_off_ear(void)
 {
-    nc_knobs_init();
+    knobs_lock1();
     nc_agc_t s;
     nc_agc_init(&s);
     nc_agc_act_t acts[4];
@@ -976,7 +991,7 @@ static void test_probe_caps_leds_off_ear(void)
  * to a sane plant and acquires normally. */
 static void test_probe_saturated_empty_clip(void)
 {
-    nc_knobs_init();
+    knobs_lock1();
     nc_agc_t s;
     nc_agc_init(&s);
     nc_agc_act_t acts[4];
@@ -1006,7 +1021,7 @@ static void test_probe_saturated_empty_clip(void)
  * lock to go back to. */
 static void test_offear_never_locks_restore_keeps_worn_lock(void)
 {
-    nc_knobs_init();
+    knobs_lock1();
     nc_agc_t s;
     nc_agc_init(&s);
     nc_agc_act_t acts[4];
@@ -1030,6 +1045,102 @@ static void test_offear_never_locks_restore_keeps_worn_lock(void)
     CHECK(drive(&s, &p, acts) >= 2);
     CHECK_EQ(p.led[0], 5);                            /* the worn lock */
     CHECK_EQ(p.led[1], 4);
+}
+
+/* ------------------------------------------------------------------ */
+/* OPTIMIZER (agc_mode 2, the default)                                 */
+/* ------------------------------------------------------------------ */
+
+/* The user's bench case (2026-10-09): a bright earlobe. The ladder settles
+ * on ~8/5 mA at 100k; the preferred 25/20 mA clips at 100k, so the
+ * optimizer steps the gain down, models the channels and lands at 50k
+ * with 25/20 mA, at the target, in three actuations. */
+static void test_opt_bright_ear_lands_at_preferred(void)
+{
+    nc_knobs_init();
+    nc_agc_t s;
+    nc_agc_init(&s);
+    nc_agc_act_t acts[4];
+    plant_t p = { .k = { 80000, 100000 }, .dacg = { 10000, 10000 },
+                  .led = { 0, 0 }, .od = { 0, 0 }, .rf = 2, .amb = 100000 };
+    int steps = 0;
+    for (int i = 0; i < 20 && s.state != NC_AGC_ST_LOCKED; i++) {
+        if (drive(&s, &p, acts) > 0) steps++;
+    }
+    CHECK_EQ(s.state, NC_AGC_ST_LOCKED);
+    CHECK_EQ(p.rf, 3);                                /* 50k */
+    CHECK_EQ(p.led[0], 25);
+    CHECK_EQ(p.led[1], 20);
+    CHECK(in_band(&p, 0) && in_band(&p, 1));
+    CHECK_EQ(steps, 3);                               /* LEDs, gain -2, gain +1 */
+}
+
+/* LOCKED in mode 2: the clip loosens and the level drifts beyond target
+ * +- 500k. It is re-optimised even though beats keep coming, but only
+ * once agc_reacq_min_s (180 s) has passed since the lock. */
+static void test_opt_drift_rerun_and_spacing(void)
+{
+    nc_knobs_init();
+    nc_agc_t s;
+    nc_agc_init(&s);
+    nc_agc_act_t acts[4];
+    plant_t p = { .k = { 80000, 100000 }, .dacg = { 10000, 10000 },
+                  .led = { 0, 0 }, .od = { 0, 0 }, .rf = 2, .amb = 100000 };
+    for (int i = 0; i < 20 && s.state != NC_AGC_ST_LOCKED; i++) drive(&s, &p, acts);
+    CHECK_EQ(s.state, NC_AGC_ST_LOCKED);
+    const uint64_t locked = s.locked_ms;
+    (void)nc_agc_take_change(&s);
+
+    p.k[0] = 30000;                                   /* IR 1.05M -> 425k */
+    while (p.now < locked + 180000) {
+        nc_agc_on_beat(&s, 800, NC_IBIF_INTERPOLATED, p.now);
+        CHECK_EQ(drive_dt(&s, &p, acts, 500), 0);
+        CHECK_EQ(s.state, NC_AGC_ST_LOCKED);
+    }
+    nc_agc_on_beat(&s, 800, NC_IBIF_INTERPOLATED, p.now);
+    CHECK(drive_dt(&s, &p, acts, 500) > 0);           /* re-optimises at once */
+    CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);
+    CHECK_EQ(s.reason, NC_AGC_RSN_DRIFT);
+    for (int i = 0; i < 20 && s.state != NC_AGC_ST_LOCKED; i++) drive(&s, &p, acts);
+    CHECK_EQ(s.state, NC_AGC_ST_LOCKED);
+    CHECK(in_band(&p, 0) && in_band(&p, 1));
+}
+
+/* Inside the drift band nothing moves, however long, beats or not. */
+static void test_opt_inside_band_never_moves(void)
+{
+    nc_knobs_init();
+    nc_agc_t s;
+    nc_agc_init(&s);
+    nc_agc_act_t acts[4];
+    plant_t p = { .k = { 80000, 100000 }, .dacg = { 10000, 10000 },
+                  .led = { 0, 0 }, .od = { 0, 0 }, .rf = 2, .amb = 100000 };
+    for (int i = 0; i < 20 && s.state != NC_AGC_ST_LOCKED; i++) drive(&s, &p, acts);
+    CHECK_EQ(s.state, NC_AGC_ST_LOCKED);
+    p.k[0] = 60000;                                   /* 1.05M -> 800k, inside */
+    for (int i = 0; i < 1200; i++) CHECK_EQ(drive_dt(&s, &p, acts, 500), 0);
+    CHECK_EQ(s.state, NC_AGC_ST_LOCKED);
+    CHECK_EQ(s.reacq_count, 0);
+}
+
+/* Off-ear before the first lock the optimizer does not run: PROBE (LEDs
+ * only, capped) still guards an empty clip in mode 2. */
+static void test_opt_probe_still_guards_empty_clip(void)
+{
+    nc_knobs_init();
+    nc_agc_t s;
+    nc_agc_init(&s);
+    nc_agc_act_t acts[4];
+    plant_t p = { .k = { 1000000, 1000000 }, .dacg = { 10000, 10000 },
+                  .led = { 5, 5 }, .od = { 0, 0 }, .rf = 2, .off_ear = true };
+    for (int i = 0; i < 60; i++) {
+        int n = drive(&s, &p, acts);
+        CHECK_EQ(count_kind(acts, n, NC_AGC_GAIN), 0);
+        CHECK_EQ(count_kind(acts, n, NC_AGC_OFFDAC), 0);
+    }
+    CHECK_EQ(p.rf, 2);
+    CHECK_EQ(p.led[0], 2);
+    CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);
 }
 
 int main(void)
@@ -1063,5 +1174,9 @@ int main(void)
     TST_RUN(test_probe_caps_leds_off_ear);
     TST_RUN(test_probe_saturated_empty_clip);
     TST_RUN(test_offear_never_locks_restore_keeps_worn_lock);
+    TST_RUN(test_opt_bright_ear_lands_at_preferred);
+    TST_RUN(test_opt_drift_rerun_and_spacing);
+    TST_RUN(test_opt_inside_band_never_moves);
+    TST_RUN(test_opt_probe_still_guards_empty_clip);
     TST_REPORT();
 }

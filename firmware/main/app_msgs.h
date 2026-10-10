@@ -38,7 +38,9 @@ typedef struct {
     union {
         struct { bool pressed; uint32_t t_ms; } btn;
         struct { nc_agc_act_t acts[4]; uint8_t count; } agc;
-        struct { bool ppg, accel, ibi, event, hrs; } subs;
+        /* status / ctrl / ota: no acquisition demand, but any of them
+         * (or the others) marks an APP session (standby, sys_task). */
+        struct { bool ppg, accel, ibi, event, hrs, status, ctrl, ota; } subs;
         struct { uint8_t len; uint8_t buf[SYS_CTRL_REQ_MAX]; } ctrl;
         struct { bool on; uint8_t reason; } gate;
         struct { uint8_t state, reason, reacq_count; } agc_state;
@@ -52,3 +54,8 @@ extern QueueHandle_t sys_q;
  * Returns false on overflow (caller increments a diag counter). */
 bool sys_post(const sys_msg_t *msg);
 bool sys_post_from_isr(const sys_msg_t *msg, BaseType_t *hpw);
+
+/* sys_task context only: a central is connected AND subscribed to one
+ * of our characteristics (or has a stream running) — an app session, as
+ * opposed to an idle OS-level link (sys_task.c s_app_subs). */
+bool sys_app_session(void);

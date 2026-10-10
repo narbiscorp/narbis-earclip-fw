@@ -142,6 +142,7 @@ typedef struct {
 #define NC_IBIF_AGC_SETTLING  (1u << 1)
 #define NC_IBIF_INTERPOLATED  (1u << 2)
 #define NC_IBIF_FIRST_AFTER_GAP (1u << 3)
+#define NC_IBIF_ARTIFACT      (1u << 4)  /* failed plausibility (nc_ibi.h); 1.3 */
 
 /* ------------------------------------------------------------------ */
 /* Fixed-point helpers (no FPU on the C6 — hot paths are Q15/Q31/i64)  */

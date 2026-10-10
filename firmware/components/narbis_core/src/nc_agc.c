@@ -3,6 +3,7 @@
  * Policy is locked — see nc_agc.h for the ladder specification and the
  * acquire -> lock state machine wrapped around it.
  */
+#include <stdlib.h>
 #include "narbis/nc_agc.h"
 #include "narbis/nc_knobs.h"
 
@@ -10,13 +11,25 @@
  * (SBAS689: 0=500k 1=250k 2=100k 3=50k 4=25k 5=10k 6=1M 7=2M). */
 static const uint8_t rf_value_order[8] = { 5, 4, 3, 2, 1, 0, 6, 7 };
 
+/* RF code -> kOhm (the OPTIMIZER's gain model, nc_agc.h). */
+static const int32_t rf_kohm[8] = { 500, 250, 100, 50, 25, 10, 1000, 2000 };
+
+/* OPTIMIZER: LED light (dc - ambient) below this is too little to model
+ * a channel from (counts). */
+#define OPT_LIGHT_MIN  20000
+
+static bool mode_optimize(void)
+{
+    return nc_knob_get(KNOB_AGC_MODE) == 2;
+}
+
 /* IBI flags that disqualify a beat from counting toward a lock.
  * NOT INTERPOLATED: nc_ibi sets it whenever the parabolic sub-sample
  * peak refinement succeeds, i.e. on nearly every good beat. Counting it
  * as unclean meant real beats could never lock, nor hold off a drift
  * re-acquire (first hardware run, 2026-10-09). */
 #define AGC_UNCLEAN_IBIF (NC_IBIF_GATED_CTX | NC_IBIF_AGC_SETTLING | \
-                          NC_IBIF_FIRST_AFTER_GAP)
+                          NC_IBIF_FIRST_AFTER_GAP | NC_IBIF_ARTIFACT)
 
 int nc_agc_rf_rank(uint8_t rf_code)
 {
@@ -255,6 +268,151 @@ static int ladder(nc_agc_t *s, const nc_agc_in_t *in, const agc_band_t *b,
     return n;
 }
 
+static bool both_within(const nc_agc_in_t *in, int32_t lo, int32_t hi);
+
+/* OPTIMIZER solve at one gain rank: LEDs that put both channels at the
+ * target under raw = amb + k * led * G. False if either is out of range. */
+static bool opt_solve(int rank, const int64_t k_q16[2], int64_t amb_q16,
+                      int32_t target, const int32_t minma[2],
+                      const int32_t maxma[2], int32_t led_out[2])
+{
+    const int64_t g = rf_kohm[nc_agc_rf_code_at(rank)];
+    const int64_t need = (int64_t)target - ((amb_q16 * g) >> 16);
+    if (need <= 0) {
+        return false;              /* ambient alone already reaches it */
+    }
+    for (int c = 0; c < 2; c++) {
+        const int64_t per_ma = (k_q16[c] * g) >> 16;   /* counts per mA */
+        if (per_ma <= 0) {
+            return false;
+        }
+        const int64_t l = (need + per_ma / 2) / per_ma;
+        if (l < minma[c] || l > maxma[c]) {
+            return false;
+        }
+        led_out[c] = (int32_t)l;
+    }
+    return true;
+}
+
+/* OPTIMIZER (agc_mode 2, nc_agc.h), in place of a ladder step. */
+static int optimize(nc_agc_t *s, const nc_agc_in_t *in, const agc_band_t *b,
+                    nc_agc_act_t out[4])
+{
+    int n = 0;
+    int32_t minma[2], maxma[2];
+    led_limits(minma, maxma);
+    int32_t pref[2] = { nc_knob_get(KNOB_AGC_PREF_MA_IR),
+                        nc_knob_get(KNOB_AGC_PREF_MA_RED) };
+    for (int c = 0; c < 2; c++) {
+        pref[c] = nc_clamp_i32(pref[c], minma[c], maxma[c]);
+    }
+    const int rank = nc_agc_rf_rank(in->rf_code);
+    const int32_t amb = (in->amb_dc > 0) ? in->amb_dc : 0;
+
+    if (rank < 0) {
+        /* Unknown gain code: put a known one first (100k). */
+        n = emit(out, n, NC_AGC_GAIN, 0, 0, 0, nc_agc_rf_code_at(3));
+    } else if (nc_knob_get(KNOB_AGC_OFFDAC_EN) != 0 &&
+               (in->offdac[0] != 0 || in->offdac[1] != 0)) {
+        /* The model has no offset term: recentre the offdacs first. */
+        for (int c = 0; c < 2; c++) {
+            if (in->offdac[c] != 0) {
+                n = emit(out, n, NC_AGC_OFFDAC, (uint8_t)c, 0, 0, 0);
+            }
+        }
+    } else if (in->sat[0] || in->sat[1]) {
+        /* Clipped: the reading is only a lower bound. Less gain, look
+         * again; at the bottom of the gain range, halve the clipped LED. */
+        if (rank > 0) {
+            n = emit(out, n, NC_AGC_GAIN, 0, 0, 0,
+                     nc_agc_rf_code_at(rank >= 2 ? rank - 2 : 0));
+        } else {
+            for (int c = 0; c < 2; c++) {
+                if (in->sat[c] && in->led_ma[c] > minma[c]) {
+                    int32_t l = nc_clamp_i32(in->led_ma[c] / 2, minma[c], maxma[c]);
+                    n = emit(out, n, NC_AGC_LED, (uint8_t)c, (uint8_t)l, 0, 0);
+                }
+            }
+        }
+    } else {
+        const int64_t g = rf_kohm[in->rf_code];
+        int64_t k_q16[2] = { 0, 0 };
+        bool dark = false;
+        for (int c = 0; c < 2; c++) {
+            const int64_t light = (int64_t)in->dc_raw[c] - amb;
+            if (in->led_ma[c] == 0 || light < OPT_LIGHT_MIN) {
+                dark = true;
+            } else {
+                k_q16[c] = (light << 16) / ((int64_t)in->led_ma[c] * g);
+            }
+        }
+        if (dark) {
+            /* Nothing to model yet (LEDs off at stream start, or a channel
+             * too dark): the preferred currents at this gain, measure.
+             * Already there and still dark: one gain notch up. */
+            for (int c = 0; c < 2; c++) {
+                if (in->led_ma[c] != pref[c]) {
+                    n = emit(out, n, NC_AGC_LED, (uint8_t)c, (uint8_t)pref[c], 0, 0);
+                }
+            }
+            if (n == 0 && rank < 7) {
+                n = emit(out, n, NC_AGC_GAIN, 0, 0, 0, nc_agc_rf_code_at(rank + 1));
+            }
+        } else {
+            const int64_t amb_q16 = ((int64_t)amb << 16) / g;
+            const int32_t target = (b->lo + b->hi) / 2;
+            int32_t led[2];
+            int best = -1;
+            /* Stay at this gain if it does the job near the preferred
+             * currents (+-40 %): no gain flip-flop on model noise. */
+            if (opt_solve(rank, k_q16, amb_q16, target, minma, maxma, led) &&
+                led[0] * 10 >= pref[0] * 6 && led[0] * 10 <= pref[0] * 14 &&
+                led[1] * 10 >= pref[1] * 6 && led[1] * 10 <= pref[1] * 14) {
+                best = rank;
+            } else {
+                int64_t best_score = INT64_MAX;
+                int32_t cand[2];
+                for (int r = 0; r < 8; r++) {   /* ascending gain: ties keep more light */
+                    if (!opt_solve(r, k_q16, amb_q16, target, minma, maxma, cand)) {
+                        continue;
+                    }
+                    const int64_t score = llabs((int64_t)cand[0] - pref[0]) +
+                                          llabs((int64_t)cand[1] - pref[1]);
+                    if (score < best_score) {
+                        best_score = score;
+                        best = r;
+                        led[0] = cand[0];
+                        led[1] = cand[1];
+                    }
+                }
+            }
+            if (best >= 0) {
+                const uint8_t code = nc_agc_rf_code_at(best);
+                if (code != in->rf_code) {
+                    n = emit(out, n, NC_AGC_GAIN, 0, 0, 0, code);
+                }
+                for (int c = 0; c < 2; c++) {
+                    if (led[c] != in->led_ma[c]) {
+                        n = emit(out, n, NC_AGC_LED, (uint8_t)c, (uint8_t)led[c], 0, 0);
+                    }
+                }
+            }
+            /* No solution in range, or the model already says "here" but
+             * the level is not in the deadband (model error): fine-tune
+             * with the ladder's one-notch steps. */
+            if (n == 0 && !both_within(in, b->lo, b->hi)) {
+                return ladder(s, in, b, out, false);
+            }
+        }
+    }
+    if (n > 0) {
+        s->last_step_ms = in->now_ms;
+        s->stepped_once = true;
+    }
+    return n;
+}
+
 /* RESTORE (nc_agc.h), in place of a ladder step. Phase 1 sets gain +
  * LEDs, phase 2 (next hold window, so it lands under the restored gain)
  * the offdacs; a phase with nothing to change falls through, and once
@@ -297,7 +455,7 @@ static int restore(nc_agc_t *s, const nc_agc_in_t *in, const agc_band_t *b,
         s->stepped_once = true;
         return n;
     }
-    return ladder(s, in, b, out, false);
+    return mode_optimize() ? optimize(s, in, b, out) : ladder(s, in, b, out, false);
 }
 
 /* ------------------------------------------------------------------ */
@@ -327,10 +485,19 @@ static bool locked_wants_reacquire(nc_agc_t *s, const nc_agc_in_t *in,
         s->sat_run = false;
     }
 
+    /* Mode 2 drifts against target +- agc_drift_band (raw counts), mode 1
+     * against the lock band. */
+    const bool opt = mode_optimize();
+    int32_t d_lo = b->lock_lo, d_hi = b->lock_hi;
+    if (opt) {
+        const int32_t t = (b->lo + b->hi) / 2;
+        const int32_t band = nc_knob_get(KNOB_AGC_DRIFT_BAND);
+        d_lo = t - band;
+        d_hi = t + band;
+    }
     bool out_of_band = false;
     for (int c = 0; c < 2; c++) {
-        if (!in->sat[c] &&
-            (in->dc_raw[c] < b->lock_lo || in->dc_raw[c] > b->lock_hi)) {
+        if (!in->sat[c] && (in->dc_raw[c] < d_lo || in->dc_raw[c] > d_hi)) {
             out_of_band = true;
         }
     }
@@ -356,7 +523,7 @@ static bool locked_wants_reacquire(nc_agc_t *s, const nc_agc_in_t *in,
     if (s->drift_run && now - s->drift_since_ms >= drift_ms) {
         /* Beats still arriving means the signal is doing its job: a
          * level outside the band is not worth a step while it does. */
-        const bool beating = s->beat_seen && now - s->last_beat_ms < drift_ms;
+        const bool beating = !opt && s->beat_seen && now - s->last_beat_ms < drift_ms;
         if (!beating) {
             to_acquire(s, NC_AGC_RSN_DRIFT);
             return true;
@@ -458,8 +625,13 @@ int nc_agc_evaluate(nc_agc_t *s, const nc_agc_in_t *in, nc_agc_act_t out[4])
     const bool probe = lock_mode && in->off_ear && (!s->locked_this_stream || hold_over);
     int n = 0;
     if (ran) {
-        n = s->restore_phase ? restore(s, in, &b, out)
-                             : ladder(s, in, &b, out, probe);
+        if (s->restore_phase) {
+            n = restore(s, in, &b, out);
+        } else if (!probe && mode_optimize()) {
+            n = optimize(s, in, &b, out);
+        } else {
+            n = ladder(s, in, &b, out, probe);
+        }
     }
 
     if (lock_mode && s->state == NC_AGC_ST_ACQUIRE) {

@@ -341,6 +341,9 @@ static void post_sub_change(void)
     m.u.subs.ibi = s_sub_ibi;
     m.u.subs.event = s_sub_event;
     m.u.subs.hrs = s_sub_hrs;
+    m.u.subs.status = s_sub_status;
+    m.u.subs.ctrl = s_sub_ctrl;
+    m.u.subs.ota = s_sub_ota;
     (void)sys_post(&m);
 }
 
@@ -1026,6 +1029,15 @@ void ble_shutdown(void)
 bool ble_is_connected(void)
 {
     return s_conn != BLE_HS_CONN_HANDLE_NONE;
+}
+
+void ble_kick(void)
+{
+    const uint16_t c = s_conn;
+    if (c != BLE_HS_CONN_HANDLE_NONE) {
+        ESP_LOGW(TAG, "dropping idle link (handle %u)", (unsigned)c);
+        (void)ble_gap_terminate(c, BLE_ERR_REM_USER_CONN_TERM);
+    }
 }
 
 uint16_t ble_att_payload_budget(void)

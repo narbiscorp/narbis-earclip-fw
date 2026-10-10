@@ -400,8 +400,10 @@ def test_knob_discover_chunk_roundtrip():
     # knob_list.h: 62 knobs; records 0..5 (225 bytes) fit the 244 budget.
     # +7 AGC lock knobs (0x040D..0x0413), +2 off-ear hold / probe
     # (0x0414..0x0415), +4 wear fast-off knobs (0x0905..0x0908),
-    # +2 standby (0x0008..0x0009), +3 ear posture (0x0804..0x0806)
-    assert chunk.total == 80
+    # +2 standby (0x0008..0x0009), +3 ear posture (0x0804..0x0806),
+    # +1 idle kick (0x000A), +2 plausibility (0x060A..0x060B),
+    # +3 optimizer (0x0416..0x0418)
+    assert chunk.total == 86
     assert len(chunk.records) == 6
     wire = P.build_knob_discover_chunk(chunk)
     assert len(wire) == 225 <= P.ATT_PAYLOAD_MAX
@@ -483,7 +485,7 @@ def test_uuid_construction():
 
 
 def test_constants_spot_checks():
-    assert P.PROTO_VER == 0x0102
+    assert P.PROTO_VER == 0x0103
     assert P.OP_KNOB_DISCOVER == 0x14 and P.OP_TEST_REPORT == 0xEA
     assert P.FACTORY_MAGIC == 0x4E415242
     assert P.RATE_SPS[P.RATE_250] == 250 and P.rate_sps(99) == 0

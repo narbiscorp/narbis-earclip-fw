@@ -114,6 +114,14 @@ static int64_t s_standby_since;       /* last instant standby was "worn" */
 static bool standby_active(void);
 #endif
 
+/* Any characteristic of ours subscribed (data, STATUS, CONTROL, OTA, or
+ * the standard HRS) = an APP session. A link without one is not a
+ * session: Windows keeps an idle connection to a paired device it reads
+ * the battery of (seen on the bench, MTU 23, nothing subscribed), and
+ * that link alone must not hold the clip out of standby forever. */
+static bool s_app_subs;
+static int64_t s_idle_link_since;     /* idle-link kick countdown       */
+
 /* Wear re-probe: while off-ear with live PPG demand, periodically lift
  * the wear veto so the sample-clocked detector can see re-wear (it
  * needs PPG frames — a hard pause would be a one-way trap). 5 s probe
@@ -271,6 +279,7 @@ static void conn_sync(bool up)
          * overrides and the AGC freeze are per-central. */
         s_in.sub_ppg = s_in.sub_accel = s_in.sub_ibi = false;
         s_in.sub_event = s_in.sub_hrs = false;
+        s_app_subs = false;
         s_in.ctrl_start_mask = 0;
         s_in.ctrl_stop_mask = 0;
         if (s_agc_frozen) {
@@ -294,10 +303,15 @@ static void conn_sync(bool up)
 /* ------------------------------------------------------------------ */
 /* Demand evaluation                                                   */
 /* ------------------------------------------------------------------ */
+bool sys_app_session(void)
+{
+    return s_connected && (s_app_subs || s_in.ctrl_start_mask != 0);
+}
+
 #if NARBIS_TEST_MODE
 static bool standby_active(void)
 {
-    return !s_connected && !s_boot_lowbatt &&
+    return !sys_app_session() && !s_boot_lowbatt &&
            s_state != NC_STATE_OTA && s_state != NC_STATE_SELFTEST;
 }
 #endif
@@ -1031,6 +1045,23 @@ static void handle_tick(void)
     }
 #endif
 
+    /* Idle-link kick (v0.3.0-31, user: "only connect with the app or the
+     * dashboard"): a phone or PC that paired once reconnects in the
+     * background, subscribes to nothing, and with one connection slot
+     * keeps the real app out. Every client of ours subscribes within a
+     * second; OTA (both paths) is exempt. */
+    {
+        const uint32_t kick_s = (uint32_t)nc_knob_get(KNOB_IDLE_KICK_S);
+        const bool idle_link = s_connected && !sys_app_session() &&
+                               s_state != NC_STATE_OTA && !dfu_legacy_active();
+        if (!idle_link || kick_s == 0) {
+            s_idle_link_since = now;
+        } else if (now - s_idle_link_since >= (int64_t)kick_s * 1000000) {
+            ble_kick();
+            s_idle_link_since = now;          /* one try per period */
+        }
+    }
+
     demand();
     status_sync(true);   /* the 1 Hz STATUS heartbeat */
 }
@@ -1153,6 +1184,9 @@ void sys_task_run(void *arg)
             s_in.sub_ibi = m.u.subs.ibi;
             s_in.sub_event = m.u.subs.event;
             s_in.sub_hrs = m.u.subs.hrs;
+            s_app_subs = m.u.subs.ppg || m.u.subs.accel || m.u.subs.ibi ||
+                         m.u.subs.event || m.u.subs.hrs || m.u.subs.status ||
+                         m.u.subs.ctrl || m.u.subs.ota;
             s_last_activity_us = esp_timer_get_time();
             demand();
             break;

@@ -36,6 +36,9 @@ X(STREAM_ON_USB,       0x0007, "stream_on_usb",         NC_KNOB_BOOL,     0,    
 X(STANDBY_OFF_S,       0x0008, "standby_off_s",         NC_KNOB_U16,      0,   3600,    120, "s",     KPL) \
 /*   standby indicator: one smooth breath (dark -> bright -> dark) per period      */ \
 X(IND_BREATH_MS,       0x0009, "ind_breath_ms",         NC_KNOB_U16,    600,   5000,   1500, "ms",    KPL) \
+/*   a central that subscribes to nothing of ours this long is dropped (phone /   */ \
+/*   PC background reconnects to a bonded clip); OTA exempt; 0 = never.           */ \
+X(IDLE_KICK_S,         0x000A, "idle_kick_s",           NC_KNOB_U16,      0,    600,     15, "s",     KPL) \
 /* -- button (0x01xx) --------------------------------------------------------------- */ \
 X(PRESS_LONG_MS,       0x0101, "press_long_ms",         NC_KNOB_U16,    500,   5000,   1500, "ms",    KPL) \
 X(PRESS_DOUBLE_MS,     0x0102, "press_double_ms",       NC_KNOB_U16,    200,   1000,    400, "ms",    KPL) \
@@ -63,20 +66,30 @@ X(AGC_SETTLE_MS,       0x040A, "agc_settle_ms",         NC_KNOB_U16,     50,   1
 X(AGC_HOLD_MS,         0x040B, "agc_hold_ms",           NC_KNOB_U16,    500,  10000,   2000, "ms",    KPL) \
 X(AGC_OFFDAC_EN,       0x040C, "agc_offdac_en",         NC_KNOB_BOOL,     0,      1,      1, "",      KPL) \
 /*   acquire -> lock (nc_agc.h): 0 = legacy continuous ladder; 1 = adjust only   */ \
-/*   until clean beats lock it, then re-acquire only on sustained clip / drift.   */ \
-X(AGC_MODE,            0x040D, "agc_mode",              NC_KNOB_U8,       0,      1,      1, "",      KPL) \
+/*   until clean beats lock it, then re-acquire only on sustained clip / drift;  */ \
+/*   2 = as 1, but acquire with the OPTIMIZER (model-based jump to the target at */ \
+/*   the preferred LED currents) and re-acquire on drift beyond agc_drift_band.  */ \
+X(AGC_MODE,            0x040D, "agc_mode",              NC_KNOB_U8,       0,      2,      2, "",      KPL) \
 X(AGC_LOCK_BEATS,      0x040E, "agc_lock_beats",        NC_KNOB_U8,       1,     30,      6, "beats", KPL) \
 X(AGC_LOCK_STABLE_MS,  0x040F, "agc_lock_stable_ms",    NC_KNOB_U16,   1000,  60000,   8000, "ms",    KPL) \
 X(AGC_LOCK_BAND_PCT,   0x0410, "agc_lock_band_pct",     NC_KNOB_U8,      10,     50,     38, "%FS",   KPL) \
 X(AGC_REACQ_SAT_MS,    0x0411, "agc_reacq_sat_ms",      NC_KNOB_U16,    500,  30000,   3000, "ms",    KPL) \
 X(AGC_REACQ_DRIFT_MS,  0x0412, "agc_reacq_drift_ms",    NC_KNOB_U16,   1000,  60000,  15000, "ms",    KPL) \
-X(AGC_REACQ_MIN_S,     0x0413, "agc_reacq_min_s",       NC_KNOB_U16,      5,   3600,     30, "s",     KPL) \
+X(AGC_REACQ_MIN_S,     0x0413, "agc_reacq_min_s",       NC_KNOB_U16,      5,   3600,    180, "s",     KPL) \
 /*   off-ear hold: once a stream has locked, leave the settings alone while the    */ \
 /*   wear detector says off-ear, for at most this long (0 = never hold).           */ \
 X(AGC_OFFEAR_HOLD_S,   0x0414, "agc_offear_hold_s",     NC_KNOB_U16,      0,    600,     20, "s",     KPL) \
 /*   probe: before the first worn lock of a stream, while off-ear, only the LEDs  */ \
 /*   move and never above this — an empty clip cannot crush offdac / gain.        */ \
 X(AGC_PROBE_MAX_MA,    0x0415, "agc_probe_max_ma",      NC_KNOB_U8,       1,     50,     10, "mA",    KPL) \
+/*   optimizer (agc_mode 2): preferred LED currents — more light at lower TIA gain */ \
+/*   (user bench 2026-10-09: 25/20 mA @ 50k vs the ladder's 8/5 mA @ 100k at the  */ \
+/*   same level: pulse 2x, rest beat error 38 -> 16 ms vs H10).                   */ \
+X(AGC_PREF_MA_IR,      0x0416, "agc_pref_ma_ir",        NC_KNOB_U8,       1,     50,     25, "mA",    KPL) \
+X(AGC_PREF_MA_RED,     0x0417, "agc_pref_ma_red",       NC_KNOB_U8,       1,     40,     20, "mA",    KPL) \
+/*   agc_mode 2, LOCKED: raw DC beyond target +- this for agc_reacq_drift_ms      */ \
+/*   re-runs the optimizer (beats or not), never sooner than agc_reacq_min_s.     */ \
+X(AGC_DRIFT_BAND,      0x0418, "agc_drift_band",        NC_KNOB_I32,  50000, 1000000, 500000, "cnt", KPL) \
 /* -- DSP (0x05xx) ------------------------------------------------------------------ */ \
 X(HP_FC_X100,          0x0501, "hp_fc_x100",            NC_KNOB_U16,     10,    200,     50, "cHz",   KPS) \
 X(BP_LO_X100,          0x0502, "bp_lo_x100",            NC_KNOB_U16,     20,    200,     50, "cHz",   KPS) \
@@ -93,6 +106,10 @@ X(INTERP_EN,           0x0606, "interp_en",             NC_KNOB_BOOL,     0,    
 X(IBI_MIN_MS,          0x0607, "ibi_min_ms",            NC_KNOB_U16,    200,   1000,    300, "ms",    KPL) \
 X(IBI_MAX_MS,          0x0608, "ibi_max_ms",            NC_KNOB_U16,   1000,   3000,   2000, "ms",    KPL) \
 X(IBI_THR_MIN,         0x0609, "ibi_thr_min",           NC_KNOB_I32,      1, 4194304,   100, "cnt",   KPL) \
+/*   plausibility (nc_ibi.h): flag ARTIFACT when an interval is more than tol %   */ \
+/*   off BOTH the median of the last 5 accepted and the last accepted interval.    */ \
+X(IBI_ART_EN,          0x060A, "ibi_art_en",            NC_KNOB_BOOL,     0,      1,      1, "",      KPL) \
+X(IBI_ART_TOL_PCT,     0x060B, "ibi_art_tol_pct",       NC_KNOB_U8,       5,     50,     15, "%",     KPL) \
 /* -- artifact gate (0x07xx) -------------------------------------------------------- */ \
 X(GATE_EN,             0x0701, "gate_en",               NC_KNOB_BOOL,     0,      1,      1, "",      KPL) \
 X(GATE_ACC_WIN_MS,     0x0702, "gate_acc_win_ms",       NC_KNOB_U16,     50,   1000,    200, "ms",    KPL) \

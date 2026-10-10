@@ -28,8 +28,9 @@ from typing import List, Optional, Tuple, Union
 # ------------------------------------------------------------------ #
 
 PROTO_VER_MAJOR = 1
-PROTO_VER_MINOR = 2  # 1.1: +TEST_LED_SWEEP_CONT, STATUS btn_pressed
+PROTO_VER_MINOR = 3  # 1.1: +TEST_LED_SWEEP_CONT, STATUS btn_pressed
 #                      1.2: +EV_AGC_STATE, STATUS agc_state/agc_reacq_count
+#                      1.3: +IBI flag ARTIFACT
 PROTO_VER = (PROTO_VER_MAJOR << 8) | PROTO_VER_MINOR
 
 # ATT payload budget at MTU 247
@@ -220,6 +221,7 @@ IBIF_GATED_CTX = 1 << 0
 IBIF_AGC_SETTLING = 1 << 1
 IBIF_INTERPOLATED = 1 << 2
 IBIF_FIRST_AFTER_GAP = 1 << 3
+IBIF_ARTIFACT = 1 << 4      # proto 1.3: failed the on-device plausibility check
 
 _IBI_HDR = struct.Struct("<IB")
 _IBI_REC = struct.Struct("<QHBB")

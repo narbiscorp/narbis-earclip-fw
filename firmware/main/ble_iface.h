@@ -32,6 +32,8 @@ void      ble_shutdown(void);     /* orderly stop for deep-sleep entry       */
 bool ble_tx_submit(ble_chan_t ch, const uint8_t *pkt, uint16_t len);
 
 bool ble_is_connected(void);
+/* Drop the current central (idle-link kick, sys_task). No-op if none. */
+void ble_kick(void);
 void ble_get_conn_stats(uint16_t *mtu, uint8_t *phy, uint16_t *interval_1_25ms);
 
 /* Current ATT notification payload ceiling = min(negotiated MTU - 3,

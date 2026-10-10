@@ -110,6 +110,12 @@ static int64_t s_bp_pow_acc, s_bp_pow_last;
 /* wear fast-off evidence, per second: raw IR rail samples, peak accel
  * gate energy (nc_wear.h rail / jolt) */
 static uint32_t s_sec_sat_ir, s_sec_acc_max;
+/* AGC level inputs: the RAW channel DC (what clips, and what the user
+ * reads off the raw trace) and the ambient DC, for the OPTIMIZER model
+ * (nc_agc.h). The DSP chain's own DC is ambient-subtracted. Q4 EMAs,
+ * alpha 1/32 (tau 0.32 s at 100 sps, well inside one AGC hold window). */
+static int32_t s_raw_dc_q4[2], s_amb_dc_q4;
+static bool s_raw_dc_primed;
 static uint16_t s_duty_gated[DUTY_RING_S], s_duty_total[DUTY_RING_S];
 static uint32_t s_duty_sum_g, s_duty_sum_t;
 static uint8_t s_duty_idx;
@@ -242,6 +248,7 @@ static void dsp_apply_reset(uint32_t req)
     s_sec_gated = 0;
     s_sec_sat_ir = 0;
     s_sec_acc_max = 0;
+    s_raw_dc_primed = false;
     s_bp_pow_acc = 0;
 
     if (full) {
@@ -321,6 +328,9 @@ static void on_beat(const nc_ibi_rec_t *rec)
         s_ibi_rn = s_ibi_ri = 0;
         return;
     }
+    if (rec->flags & NC_IBIF_ARTIFACT) {
+        return;                        /* sent (flagged), not counted in HR */
+    }
 
     s_ibi_ring[s_ibi_ri] = rec->ibi_ms;
     s_ibi_ri = (uint8_t)((s_ibi_ri + 1) % 3);
@@ -362,7 +372,8 @@ static void agc_tick(uint64_t t_us)
     s_agc_period_smp = agc_period_samples();   /* LIVE knob pickup */
 
     nc_agc_in_t in = {
-        .dc_raw  = { s_ch[0].dc, s_ch[1].dc },
+        .dc_raw  = { s_raw_dc_q4[0] >> 4, s_raw_dc_q4[1] >> 4 },
+        .amb_dc  = s_amb_dc_q4 >> 4,
         .sat     = { s_sat_win[0], s_sat_win[1] },
         .led_ma  = { afe4404_cur_ir_ma(), afe4404_cur_red_ma() },
         .rf_code = afe4404_cur_rf(),
@@ -465,6 +476,17 @@ static void dsp_process(const nc_ppg_sample_t *s)
     bool amb_sub = nc_knob_get(KNOB_AMB_SUBTRACT) != 0;
     int32_t xi = amb_sub ? s->ir - s->amb : s->ir;
     int32_t xr = amb_sub ? s->red - s->amb : s->red;
+
+    /* Raw + ambient DC for the AGC (|x| < 2^22, so x*16 fits int32). */
+    if (!s_raw_dc_primed) {
+        s_raw_dc_q4[0] = s->ir * 16;
+        s_raw_dc_q4[1] = s->red * 16;
+        s_amb_dc_q4 = s->amb * 16;
+        s_raw_dc_primed = true;
+    }
+    s_raw_dc_q4[0] += (s->ir * 16 - s_raw_dc_q4[0]) >> 5;
+    s_raw_dc_q4[1] += (s->red * 16 - s_raw_dc_q4[1]) >> 5;
+    s_amb_dc_q4 += (s->amb * 16 - s_amb_dc_q4) >> 5;
 
     nc_dsp_out_t o[2];
     nc_dsp_run(&s_ch[0], xi, &o[0]);

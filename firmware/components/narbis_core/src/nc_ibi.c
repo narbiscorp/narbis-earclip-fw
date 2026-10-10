@@ -88,7 +88,84 @@ void nc_ibi_init(nc_ibi_t *s, uint32_t ts_us_measured)
     s->k_ibi_min_ms    = (uint16_t)nc_knob_get(KNOB_IBI_MIN_MS);
     s->k_ibi_max_ms    = (uint16_t)nc_knob_get(KNOB_IBI_MAX_MS);
     s->k_thr_min       = nc_knob_get(KNOB_IBI_THR_MIN);
+    s->k_art_en        = nc_knob_get(KNOB_IBI_ART_EN) != 0;
+    s->k_art_tol_pct   = (uint8_t)nc_knob_get(KNOB_IBI_ART_TOL_PCT);
+    nc_ibi_plaus_reset(&s->plaus);
     derive(s, ts_us_measured, true);
+}
+
+/* ------------------------------------------------------------------ */
+/* Plausibility (ARTIFACT, nc_ibi.h)                                   */
+/* ------------------------------------------------------------------ */
+
+void nc_ibi_plaus_reset(nc_ibi_plaus_t *p)
+{
+    memset(p, 0, sizeof *p);
+}
+
+static uint16_t median_u16(const uint16_t *v, uint8_t n)
+{
+    uint16_t s[NC_IBI_ART_REF];
+    for (uint8_t i = 0; i < n; i++) s[i] = v[i];
+    for (uint8_t i = 1; i < n; i++) {          /* insertion sort, n <= 5 */
+        uint16_t x = s[i];
+        uint8_t j = i;
+        while (j > 0 && s[j - 1] > x) { s[j] = s[j - 1]; j--; }
+        s[j] = x;
+    }
+    return (n & 1) ? s[n / 2] : (uint16_t)(((uint32_t)s[n / 2 - 1] + s[n / 2]) / 2u);
+}
+
+static void plaus_accept(nc_ibi_plaus_t *p, uint16_t ibi_ms)
+{
+    p->ref[p->idx] = ibi_ms;
+    p->idx = (uint8_t)((p->idx + 1) % NC_IBI_ART_REF);
+    if (p->n < NC_IBI_ART_REF) p->n++;
+    p->last = ibi_ms;
+}
+
+/* |a - b| * 100 > tol * b, in integers. */
+static bool off_by(uint16_t a, uint16_t b, uint8_t tol_pct)
+{
+    const uint32_t d = (a > b) ? (uint32_t)(a - b) : (uint32_t)(b - a);
+    return d * 100u > (uint32_t)tol_pct * b;
+}
+
+bool nc_ibi_plaus_check(nc_ibi_plaus_t *p, uint16_t ibi_ms, uint8_t tol_pct)
+{
+    if (p->n < 3) {                            /* warm-up: nothing to judge by */
+        plaus_accept(p, ibi_ms);
+        return false;
+    }
+    const uint16_t med = median_u16(p->ref, p->n);
+    if (!(off_by(ibi_ms, med, tol_pct) && off_by(ibi_ms, p->last, tol_pct))) {
+        p->run_n = 0;
+        plaus_accept(p, ibi_ms);
+        return false;
+    }
+    /* Flagged. NC_IBI_ART_ANCHOR in a row that agree with each other are
+     * a real rate change: adopt them as the reference. */
+    if (p->run_n < NC_IBI_ART_ANCHOR) {
+        p->run[p->run_n++] = ibi_ms;
+    } else {
+        for (uint8_t i = 1; i < NC_IBI_ART_ANCHOR; i++) p->run[i - 1] = p->run[i];
+        p->run[NC_IBI_ART_ANCHOR - 1] = ibi_ms;
+    }
+    if (p->run_n == NC_IBI_ART_ANCHOR) {
+        uint16_t lo = p->run[0], hi = p->run[0];
+        for (uint8_t i = 1; i < NC_IBI_ART_ANCHOR; i++) {
+            if (p->run[i] < lo) lo = p->run[i];
+            if (p->run[i] > hi) hi = p->run[i];
+        }
+        const uint16_t rmed = median_u16(p->run, NC_IBI_ART_ANCHOR);
+        if ((uint32_t)(hi - lo) * 100u <= (uint32_t)tol_pct * rmed) {
+            uint16_t run[NC_IBI_ART_ANCHOR];   /* the reset clears p->run */
+            memcpy(run, p->run, sizeof run);
+            nc_ibi_plaus_reset(p);
+            for (uint8_t i = 0; i < NC_IBI_ART_ANCHOR; i++) plaus_accept(p, run[i]);
+        }
+    }
+    return true;
 }
 
 void nc_ibi_set_ts(nc_ibi_t *s, uint32_t ts_us_measured)
@@ -169,6 +246,7 @@ static bool commit(nc_ibi_t *s, int64_t thr, nc_ibi_rec_t *out)
         fl |= NC_IBIF_FIRST_AFTER_GAP;
         plaus = (s->prev_ibi_ms > 0) ? 8 : 0;
         s->prev_ibi_ms = 0;
+        nc_ibi_plaus_reset(&s->plaus);       /* a gap: the old rate is moot */
         emit = true;
     } else if (dt_ms < (uint32_t)s->k_ibi_min_ms) {
         /* Too-short interval (double-fire class): emit nothing, but the
@@ -184,6 +262,9 @@ static bool commit(nc_ibi_t *s, int64_t thr, nc_ibi_rec_t *out)
         }
         ibi_out = (uint16_t)dt_ms;
         s->prev_ibi_ms = ibi_out;
+        if (s->k_art_en && nc_ibi_plaus_check(&s->plaus, ibi_out, s->k_art_tol_pct)) {
+            fl |= NC_IBIF_ARTIFACT;
+        }
         emit = true;
     }
     s->t_last_valid = true;
@@ -203,6 +284,9 @@ static bool commit(nc_ibi_t *s, int64_t thr, nc_ibi_rec_t *out)
         int conf = (int)(margin + consist) + plaus;
         if (conf < 0) conf = 0;
         if (conf > 100) conf = 100;
+        if ((fl & NC_IBIF_ARTIFACT) && conf > NC_IBI_ART_CONF_MAX) {
+            conf = NC_IBI_ART_CONF_MAX;      /* for consumers that ignore flags */
+        }
         out->t_beat_us = t_beat;
         out->ibi_ms = ibi_out;
         out->confidence = (uint8_t)conf;

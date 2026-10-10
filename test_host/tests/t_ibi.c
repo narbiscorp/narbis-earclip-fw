@@ -34,6 +34,7 @@
  *    times), so the spec says to subtract the median offset and bound
  *    the residual: median |err - median(err)| <= 1 sample period.
  */
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -440,8 +441,83 @@ static void t_set_ts_tracking(void)
     free(v.bp);
 }
 
+/* ---- plausibility (ARTIFACT, proto 1.3) ---------------------------- */
+
+static int flags_for(nc_ibi_plaus_t *p, const uint16_t *ibi, int n, bool *out)
+{
+    int k = 0;
+    for (int i = 0; i < n; i++) {
+        out[i] = nc_ibi_plaus_check(p, ibi[i], 15);
+        k += out[i];
+    }
+    return k;
+}
+
+static void t_plaus_steady_and_warmup(void)
+{
+    nc_ibi_plaus_t p;
+    nc_ibi_plaus_reset(&p);
+    /* The first three are taken unchecked, however odd. */
+    CHECK(!nc_ibi_plaus_check(&p, 800, 15));
+    CHECK(!nc_ibi_plaus_check(&p, 400, 15));
+    CHECK(!nc_ibi_plaus_check(&p, 820, 15));
+    for (int i = 0; i < 200; i++) {
+        CHECK(!nc_ibi_plaus_check(&p, (uint16_t)(780 + (i % 5) * 10), 15));
+    }
+}
+
+/* Chewing / talking junk from the first guided recordings: a double
+ * detection splits one interval into two short ones, a miss doubles it. */
+static void t_plaus_double_and_missed(void)
+{
+    nc_ibi_plaus_t p;
+    nc_ibi_plaus_reset(&p);
+    const uint16_t seq[] = { 800, 790, 810, 800, 805,
+                             400, 405,            /* double detection */
+                             800, 795,
+                             1600,                /* missed beat      */
+                             810, 800 };
+    bool f[sizeof seq / sizeof seq[0]];
+    const int n = (int)(sizeof seq / sizeof seq[0]);
+    CHECK_EQ(flags_for(&p, seq, n, f), 3);
+    CHECK(f[5] && f[6] && f[9]);
+    CHECK(!f[7] && !f[10]);
+}
+
+/* Paced breathing, 6 breaths/min at 65 bpm with +-25 % respiratory sinus
+ * arrhythmia: real beats, none may be flagged (coherence training). */
+static void t_plaus_paced_breathing_clean(void)
+{
+    nc_ibi_plaus_t p;
+    nc_ibi_plaus_reset(&p);
+    const double base = 60000.0 / 65.0;
+    double t = 0;
+    int flagged = 0;
+    for (int i = 0; i < 600; i++) {
+        const double ibi = base * (1.0 + 0.25 * sin(2.0 * 3.14159265358979 * 0.1 * t / 1000.0));
+        flagged += nc_ibi_plaus_check(&p, (uint16_t)(ibi + 0.5), 15);
+        t += ibi;
+    }
+    CHECK_EQ(flagged, 0);
+}
+
+/* A genuine rate change (stood up): four agreeing flagged intervals become
+ * the new reference, later beats at the new rate pass. */
+static void t_plaus_reanchors_on_real_change(void)
+{
+    nc_ibi_plaus_t p;
+    nc_ibi_plaus_reset(&p);
+    for (int i = 0; i < 6; i++) CHECK(!nc_ibi_plaus_check(&p, 800, 15));
+    for (int i = 0; i < 4; i++) CHECK(nc_ibi_plaus_check(&p, 600, 15));
+    for (int i = 0; i < 20; i++) CHECK(!nc_ibi_plaus_check(&p, 600, 15));
+}
+
 int main(void)
 {
+    TST_RUN(t_plaus_steady_and_warmup);
+    TST_RUN(t_plaus_double_and_missed);
+    TST_RUN(t_plaus_paced_breathing_clean);
+    TST_RUN(t_plaus_reanchors_on_real_change);
     TST_RUN(t_clean_and_noisy_rates);
     TST_RUN(t_default_knobs_clean);
     TST_RUN(t_jitter_clean_100);

@@ -53,6 +53,24 @@
  * nc_agc_reacquire; freeze is an input). agc_mode = 0 keeps the legacy
  * continuous ladder, which never locks.
  *
+ * OPTIMIZER (agc_mode 2, the default). The ladder's 1 mA per hold window
+ * from the minimum settles on the LEAST light that reaches the band (8/5
+ * mA @ 100k on the first wearer). The same level at 25/20 mA @ 50k gave
+ * twice the pulse and cut the resting beat error vs a Polar H10 from 38
+ * to 16 ms (user bench, 2026-10-09). So ACQUIRE instead jumps. It models
+ *     raw = amb + k_c * led_c * G(rf)
+ * (k per channel from one measurement, amb scales with the shared TIA
+ * gain), then picks the gain at which the LEDs needed for the target sit
+ * closest to agc_pref_ma_ir / _red, and sets gain + both LEDs in one step
+ * (offdacs recentred to 0 first, the model has no offset term). It
+ * refines on the next hold windows until both channels are in the
+ * deadband, then locks as usual. A clipped reading is only a lower
+ * bound: step the gain down 2 notches and look again. LOCKED, it
+ * re-acquires when the raw DC leaves target +- agc_drift_band for
+ * agc_reacq_drift_ms, beats or not, never sooner than agc_reacq_min_s
+ * (user: "rerun if it drifts toward the rails, at most every few
+ * minutes"). PROBE, HOLD and RESTORE below apply unchanged.
+ *
  * Off-ear hold and put-back restore (first on-ear runs: the clip went
  * on the table, the SAT re-acquire walked the LEDs down chasing an
  * empty clip, and back on the ear it took longer than 30 s to climb
@@ -121,6 +139,8 @@ typedef struct {
     uint64_t now_ms;
     bool     frozen;     /* NC_OP_AGC_FREEZE */
     bool     off_ear;    /* wear detector: not worn (false = worn / unknown) */
+    int32_t  amb_dc;     /* ambient (LEDs-off) DC under the current gain,
+                          * raw counts; 0 if unknown (OPTIMIZER model)   */
 } nc_agc_in_t;
 
 typedef enum {

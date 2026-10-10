@@ -131,6 +131,7 @@ void test_led_ind_poll(void)
         return;
     }
     const bool conn = ble_is_connected();
+    const bool session = sys_app_session();   /* not an idle OS link */
     const int64_t now_us = esp_timer_get_time();
 
     /* Onboard module LED first — never handed over, tracks link state
@@ -150,21 +151,20 @@ void test_led_ind_poll(void)
     }
 
     if (s_ind == IND_RELEASED) {
-        if (conn) {
-            return;                /* re-arm needs a disconnect too */
+        if (session) {
+            return;                /* re-arm needs the app session to end */
         }
         s_ind = IND_OWNING;
-        ESP_LOGI(TAG, "re-armed (idle + disconnected)");
+        ESP_LOGI(TAG, "re-armed (idle + no app session)");
     }
 
-    /* OWNING: steady while connected, breathing while not. The breath
-     * phase comes from the clock, so a skipped tick (full sys_q) only
-     * holds one level a little longer. */
-    uint32_t level = 255;
-    if (!conn) {
-        const int64_t period_us = (int64_t)nc_knob_get(KNOB_IND_BREATH_MS) * 1000;
-        level = k_breath[((now_us % period_us) * 64) / period_us];
-    }
+    /* OWNING: always breathing — a steady optical light means SENSING
+     * (the AGC owns the LEDs), never just "connected" (user, v0.3.0-31:
+     * the old steady-while-connected looked exactly like "worn"). The
+     * breath phase comes from the clock, so a skipped tick (full sys_q)
+     * only holds one level a little longer. */
+    const int64_t period_us = (int64_t)nc_knob_get(KNOB_IND_BREATH_MS) * 1000;
+    const uint32_t level = k_breath[((now_us % period_us) * 64) / period_us];
     const uint8_t ir = (uint8_t)((IND_IR_MA * level + 127) / 255);
     const uint8_t red = (uint8_t)((IND_RED_MA * level + 127) / 255);
 
