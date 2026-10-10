@@ -1,1 +1,1 @@
-narbis-earclip-functest.bin  |  v0.3.0-36-g0a37477  |  built 2026-10-09T22:31:59  |  NARBIS_TEST_MODE=1
+narbis-earclip-functest.bin  |  v0.3.0-38-ga92c7cb  |  built 2026-10-09T23:03:11  |  NARBIS_TEST_MODE=1
