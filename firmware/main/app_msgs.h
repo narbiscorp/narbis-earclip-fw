@@ -59,3 +59,6 @@ bool sys_post_from_isr(const sys_msg_t *msg, BaseType_t *hpw);
  * of our characteristics (or has a stream running) — an app session, as
  * opposed to an idle OS-level link (sys_task.c s_app_subs). */
 bool sys_app_session(void);
+/* A console command ran (console.c): holds off the TEST build's standby
+ * auto-off. Any task. */
+void sys_standby_note_activity(void);

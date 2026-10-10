@@ -17,6 +17,7 @@
  * is stateless). Symmetrically a STREAM_STOP clears the same source's
  * latched start bit, so stop always wins over an older manual start.
  */
+#include <stdatomic.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -305,6 +306,16 @@ static void conn_sync(bool up)
 /* ------------------------------------------------------------------ */
 /* Demand evaluation                                                   */
 /* ------------------------------------------------------------------ */
+/* Console activity (TEST builds): any command holds off the standby
+ * auto-off for another standby_off_s, so a clip being driven over USB is
+ * not powered off mid-session. Set from the console task, read here. */
+static _Atomic bool s_console_activity;
+
+void sys_standby_note_activity(void)
+{
+    atomic_store(&s_console_activity, true);
+}
+
 bool sys_app_session(void)
 {
     return s_connected && (s_app_subs || s_in.ctrl_start_mask != 0);
@@ -1073,16 +1084,20 @@ static void handle_tick(void)
     }
 #else
     /* Standby auto-off (TEST builds; production keeps the policies
-     * above). Worn = local sensing up AND the optical detector agrees;
-     * USB present never counts down (charging / flashing / console). */
+     * above). Worn = local sensing up AND the optical detector agrees.
+     * USB counts down too (v0.3.0-37, user: "sitting on table, connected
+     * to usb it should sleep") — it charges just the same in OFF. Only a
+     * console command holds it off (bench work over USB); to flash a
+     * sleeping clip, press the button first (OFF drops the USB port). */
     {
         const uint32_t off_s = (uint32_t)nc_knob_get(KNOB_STANDBY_OFF_S);
         const bool worn_now = acq_ppg_running() && s_worn;
-        if (!standby_active() || s_vusb || off_s == 0 || worn_now) {
+        const bool console = atomic_exchange(&s_console_activity, false);
+        if (!standby_active() || off_s == 0 || worn_now || console) {
             s_standby_since = now;
         } else if (now - s_standby_since >= (int64_t)off_s * 1000000) {
-            ESP_LOGI(TAG, "standby: not worn for %u s on battery — OFF",
-                     (unsigned)off_s);
+            ESP_LOGI(TAG, "standby: not worn for %u s (%s) — OFF",
+                     (unsigned)off_s, s_vusb ? "USB" : "battery");
             orderly_off(false);
         }
     }

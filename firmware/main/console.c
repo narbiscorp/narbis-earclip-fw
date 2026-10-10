@@ -583,6 +583,15 @@ static int cmd_coredump(int argc, char **argv)
 /* ------------------------------------------------------------------ */
 /* Registration                                                        */
 /* ------------------------------------------------------------------ */
+/* A console command is bench activity: it holds off the TEST build's
+ * standby auto-off, so a clip driven over USB is not powered off under
+ * the operator (sys_task.c). */
+static int console_dispatch(void *ctx, int argc, char **argv)
+{
+    sys_standby_note_activity();
+    return ((esp_console_cmd_func_t)ctx)(argc, argv);
+}
+
 static void register_all(void)
 {
     knob_args.action = arg_str1(NULL, NULL, "<action>",
@@ -650,8 +659,14 @@ static void register_all(void)
         { .command = "coredump", .help = "coredump info|erase",
           .func = cmd_coredump, .argtable = &core_args },
     };
+    /* Every command goes through console_dispatch (bench activity holds
+     * off the standby auto-off); the real handler rides in the context. */
     for (size_t i = 0; i < sizeof cmds / sizeof cmds[0]; i++) {
-        ESP_ERROR_CHECK(esp_console_cmd_register(&cmds[i]));
+        esp_console_cmd_t c = cmds[i];
+        c.func_w_context = console_dispatch;
+        c.context = (void *)c.func;
+        c.func = NULL;
+        ESP_ERROR_CHECK(esp_console_cmd_register(&c));
     }
     esp_console_register_help_command();
 }
