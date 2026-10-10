@@ -314,6 +314,13 @@ static bool standby_active(void)
     return !sys_app_session() && !s_boot_lowbatt &&
            s_state != NC_STATE_OTA && s_state != NC_STATE_SELFTEST;
 }
+
+/* Local sensing STARTS only in standby (ear posture), but once running it
+ * carries through an app connecting: the app subscribes CONTROL first and
+ * PPG a moment later, and dropping local demand in between restarted the
+ * acquisition — LEDs off, gain back to 100k, the optimizer's work redone
+ * (bench, v0.3.0-31). Posture lost, a host STOP, OTA / selftest end it. */
+static bool s_local_latched;
 #endif
 
 static void demand(void)
@@ -321,8 +328,19 @@ static void demand(void)
     s_in.gate_en = nc_knob_get(KNOB_GATE_EN) != 0;
 #if NARBIS_TEST_MODE
     s_in.wear_paused = false;        /* test builds never wear-gate */
-    s_in.standby_watch = standby_active();
-    s_in.local_ppg = s_in.standby_watch && acq_ear_posture();
+    {
+        const bool host_stop = (s_in.ctrl_stop_mask &
+                                (NC_STREAM_MASK_PPG | NC_STREAM_MASK_IBI)) != 0;
+        const bool blocked = s_boot_lowbatt || s_state == NC_STATE_OTA ||
+                             s_state == NC_STATE_SELFTEST;
+        if (!acq_ear_posture() || host_stop || blocked) {
+            s_local_latched = false;
+        } else if (standby_active()) {
+            s_local_latched = true;
+        }
+    }
+    s_in.standby_watch = standby_active() || s_local_latched;
+    s_in.local_ppg = s_local_latched;
 #else
     s_in.wear_paused = !s_worn && !s_wear_probe;
 #endif
