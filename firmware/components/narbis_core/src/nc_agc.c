@@ -18,6 +18,10 @@ static const int32_t rf_kohm[8] = { 500, 250, 100, 50, 25, 10, 1000, 2000 };
  * a channel from (counts). */
 #define OPT_LIGHT_MIN  20000
 
+/* OPTIMIZER, inside the band: a gain change must bring the LEDs at least
+ * this much closer to the preferred currents (sum over both, mA). */
+#define OPT_SWITCH_MARGIN_MA  4
+
 static bool mode_optimize(void)
 {
     return nc_knob_get(KNOB_AGC_MODE) == 2;
@@ -270,6 +274,17 @@ static int ladder(nc_agc_t *s, const nc_agc_in_t *in, const agc_band_t *b,
 
 static bool both_within(const nc_agc_in_t *in, int32_t lo, int32_t hi);
 
+/* OPTIMIZER: both LEDs within +-40 % of the preferred currents. */
+static bool near_pref(const int32_t led[2], const int32_t pref[2])
+{
+    for (int c = 0; c < 2; c++) {
+        if (led[c] * 10 < pref[c] * 6 || led[c] * 10 > pref[c] * 14) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /* OPTIMIZER solve at one gain rank: LEDs that put both channels at the
  * target under raw = amb + k * led * G. False if either is out of range. */
 static bool opt_solve(int rank, const int64_t k_q16[2], int64_t amb_q16,
@@ -362,16 +377,25 @@ static int optimize(nc_agc_t *s, const nc_agc_in_t *in, const agc_band_t *b,
         } else {
             const int64_t amb_q16 = ((int64_t)amb << 16) / g;
             const int32_t target = (b->lo + b->hi) / 2;
+            const int32_t cur[2] = { in->led_ma[0], in->led_ma[1] };
+            /* In the band near the preferred currents is the goal: hold
+             * still. Re-solving there chases breathing, whose +-2 % DC
+             * flips a rounding-boundary answer by 1 mA every breath, and
+             * each such step reset the clean-beat count: the AGC never
+             * locked (v0.3.0-32, clip put back on, 2026-10-09). */
+            const bool in_band = both_within(in, b->lo, b->hi);
+            if (in_band && near_pref(cur, pref)) {
+                return 0;
+            }
             int32_t led[2];
             int best = -1;
+            int64_t best_score = INT64_MAX;
             /* Stay at this gain if it does the job near the preferred
              * currents (+-40 %): no gain flip-flop on model noise. */
             if (opt_solve(rank, k_q16, amb_q16, target, minma, maxma, led) &&
-                led[0] * 10 >= pref[0] * 6 && led[0] * 10 <= pref[0] * 14 &&
-                led[1] * 10 >= pref[1] * 6 && led[1] * 10 <= pref[1] * 14) {
+                near_pref(led, pref)) {
                 best = rank;
             } else {
-                int64_t best_score = INT64_MAX;
                 int32_t cand[2];
                 for (int r = 0; r < 8; r++) {   /* ascending gain: ties keep more light */
                     if (!opt_solve(r, k_q16, amb_q16, target, minma, maxma, cand)) {
@@ -385,6 +409,18 @@ static int optimize(nc_agc_t *s, const nc_agc_in_t *in, const agc_band_t *b,
                         led[0] = cand[0];
                         led[1] = cand[1];
                     }
+                }
+            }
+            /* In the band but far from the preferred currents (e.g. the
+             * old ladder's 8/5 mA at 100k): only a gain change that brings
+             * the LEDs clearly closer is worth a step. Trimming the LEDs at
+             * this gain would only re-centre a level already in band. */
+            if (best >= 0 && in_band) {
+                const int64_t cur_score = llabs((int64_t)cur[0] - pref[0]) +
+                                          llabs((int64_t)cur[1] - pref[1]);
+                if (nc_agc_rf_code_at(best) == in->rf_code ||
+                    best_score + OPT_SWITCH_MARGIN_MA > cur_score) {
+                    return 0;
                 }
             }
             if (best >= 0) {

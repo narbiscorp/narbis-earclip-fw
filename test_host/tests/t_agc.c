@@ -11,6 +11,7 @@
  * sat asserts when the ideal (unclipped) dc reaches 95% of 2^21;
  * dc_raw clips at full scale like the real ADC.
  */
+#include <math.h>
 #include <stdio.h>
 #include "tst.h"
 #include "narbis/nc_agc.h"
@@ -1143,6 +1144,112 @@ static void test_opt_probe_still_guards_empty_clip(void)
     CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);
 }
 
+/* Put back on (v0.3.0-32 on the lobe, 2026-10-09): the re-seated clip sits
+ * in the band near the preferred currents, but breathing moves the DC
+ * +-2 % (4 s period). With the exact solution at a rounding boundary
+ * (IR 24.5 mA here) that flips the integer answer every breath; chasing it
+ * by +-1 mA reset the clean-beat count every hold window, so the AGC
+ * "kept increasing and decreasing a couple of mA" and never locked. In the
+ * band with the LEDs near the preferred currents it must hold still. */
+static void test_opt_breathing_does_not_dither(void)
+{
+    nc_knobs_init();
+    nc_agc_t s;
+    nc_agc_init(&s);
+    nc_agc_act_t acts[4];
+    /* 50k: IR per mA = k/2, target - ambient = 998576 -> IR 24.5, red 19.5. */
+    const int32_t k0[2] = { 81516, 102418 };
+    plant_t p = { .k = { k0[0], k0[1] }, .dacg = { 10000, 10000 },
+                  .led = { 25, 20 }, .od = { 0, 0 }, .rf = 3, .amb = 100000 };
+    int steps = 0;
+    uint64_t next_beat = 800;
+    for (uint64_t t = 0; t < 60000; t += 500) {
+        const double m = 1.0 + 0.02 * sin(2.0 * 3.14159265358979 * (double)t / 4000.0);
+        for (int c = 0; c < 2; c++) p.k[c] = (int32_t)(k0[c] * m);
+        if (t >= next_beat) {
+            nc_agc_on_beat(&s, 800, NC_IBIF_INTERPOLATED, p.now);
+            next_beat += 800;
+        }
+        if (drive_dt(&s, &p, acts, 500) > 0) steps++;
+        CHECK(in_band(&p, 0) && in_band(&p, 1));
+    }
+    CHECK_EQ(s.state, NC_AGC_ST_LOCKED);
+    CHECK(s.locked_ms <= 10000);                      /* 6 clean beats, ~5 s */
+    CHECK_EQ(steps, 0);
+    CHECK_EQ(p.rf, 3);
+}
+
+/* The same breathing with the LEDs far from the preferred currents (the
+ * old ladder's 8/5 mA at 100k, in the band): the optimizer still moves it
+ * to the preferred currents once, by a gain change, then holds still. */
+static void test_opt_in_band_far_from_pref_moves_once(void)
+{
+    nc_knobs_init();
+    nc_agc_t s;
+    nc_agc_init(&s);
+    nc_agc_act_t acts[4];
+    const int32_t k0[2] = { 120000, 190000 };         /* 100k: IR 8, red 5 */
+    plant_t p = { .k = { k0[0], k0[1] }, .dacg = { 10000, 10000 },
+                  .led = { 8, 5 }, .od = { 0, 0 }, .rf = 2, .amb = 100000 };
+    CHECK(in_band(&p, 0) && in_band(&p, 1));
+    int steps = 0;
+    uint64_t next_beat = 800;
+    for (uint64_t t = 0; t < 60000; t += 500) {
+        const double m = 1.0 + 0.02 * sin(2.0 * 3.14159265358979 * (double)t / 4000.0);
+        for (int c = 0; c < 2; c++) p.k[c] = (int32_t)(k0[c] * m);
+        if (t >= next_beat) {
+            nc_agc_on_beat(&s, 800, NC_IBIF_INTERPOLATED, p.now);
+            next_beat += 800;
+        }
+        if (drive_dt(&s, &p, acts, 500) > 0) steps++;
+    }
+    CHECK_EQ(s.state, NC_AGC_ST_LOCKED);
+    CHECK(steps >= 1 && steps <= 2);
+    CHECK(p.rf != 2);                                 /* left 100k for more light */
+    CHECK(p.led[0] >= 15 && p.led[0] <= 35);          /* near preferred 25 */
+    CHECK(in_band(&p, 0) && in_band(&p, 1));
+}
+
+/* The user's sequence end to end in mode 2: lock on the lobe, take the
+ * clip off past the 20 s hold (it rails), put it back with less light than
+ * before, breathing all along. Re-optimised in a step or two, then locked. */
+static void test_opt_putback_with_breathing_locks(void)
+{
+    nc_knobs_init();
+    nc_agc_t s;
+    nc_agc_init(&s);
+    nc_agc_act_t acts[4];
+    plant_t p = { .k = { 80000, 100000 }, .dacg = { 10000, 10000 },
+                  .led = { 0, 0 }, .od = { 0, 0 }, .rf = 2, .amb = 100000 };
+    for (int i = 0; i < 20 && s.state != NC_AGC_ST_LOCKED; i++) drive(&s, &p, acts);
+    CHECK_EQ(s.state, NC_AGC_ST_LOCKED);
+
+    p.off_ear = true;                                 /* off: the empty clip rails */
+    p.k[0] = p.k[1] = 1000000;
+    for (int i = 0; i < 60; i++) drive_dt(&s, &p, acts, 500);
+
+    p.off_ear = false;                                /* back on, 35 % less light */
+    const int32_t k0[2] = { 50000, 62000 };
+    nc_agc_reacquire(&s, NC_AGC_RSN_WEAR);
+    const uint64_t t_on = p.now;
+    int steps = 0;
+    uint64_t next_beat = p.now + 800;
+    while (p.now < t_on + 60000) {
+        const double m = 1.0 + 0.02 * sin(2.0 * 3.14159265358979 *
+                                          (double)(p.now - t_on) / 4000.0);
+        for (int c = 0; c < 2; c++) p.k[c] = (int32_t)(k0[c] * m);
+        if (p.now >= next_beat) {
+            nc_agc_on_beat(&s, 800, NC_IBIF_INTERPOLATED, p.now);
+            next_beat += 800;
+        }
+        if (drive_dt(&s, &p, acts, 500) > 0) steps++;
+    }
+    CHECK_EQ(s.state, NC_AGC_ST_LOCKED);
+    CHECK(s.locked_ms <= t_on + 15000);
+    CHECK(steps >= 1 && steps <= 3);
+    CHECK(in_band(&p, 0) && in_band(&p, 1));
+}
+
 int main(void)
 {
     nc_knobs_init();
@@ -1178,5 +1285,8 @@ int main(void)
     TST_RUN(test_opt_drift_rerun_and_spacing);
     TST_RUN(test_opt_inside_band_never_moves);
     TST_RUN(test_opt_probe_still_guards_empty_clip);
+    TST_RUN(test_opt_breathing_does_not_dither);
+    TST_RUN(test_opt_in_band_far_from_pref_moves_once);
+    TST_RUN(test_opt_putback_with_breathing_locks);
     TST_REPORT();
 }
