@@ -109,7 +109,7 @@ static const char *TAG = "ble";
 static volatile uint16_t s_conn = BLE_HS_CONN_HANDLE_NONE;
 static volatile uint16_t s_mtu = 23;   /* BLE_ATT_MTU_DFLT */
 static volatile bool s_encrypted;
-static bool s_peer_was_bonded;         /* host task only */
+static volatile bool s_peer_was_bonded; /* host task writes; sys_task reads */
 
 static volatile bool s_sub_ppg, s_sub_accel, s_sub_ibi, s_sub_event;
 static volatile bool s_sub_status, s_sub_ctrl, s_sub_hrs, s_sub_batt;
@@ -883,6 +883,13 @@ static void tx_power_apply(bool force)
         ESP_LOGI(TAG, "tx power %ld dBm (controller level %d)", (long)dbm, (int)lvl);
     }
     s_tx_dbm_applied = dbm;
+}
+
+void ble_link_security(bool *peer_bonded, bool *encrypted)
+{
+    const bool up = s_conn != BLE_HS_CONN_HANDLE_NONE;
+    *peer_bonded = up && s_peer_was_bonded;
+    *encrypted = up && s_encrypted;
 }
 
 void ble_tx_power_poll(void)

@@ -124,6 +124,7 @@ static bool standby_active(void);
  * that link alone must not hold the clip out of standby forever. */
 static bool s_app_subs;
 static int64_t s_idle_link_since;     /* idle-link kick countdown       */
+static bool s_idle_pairing;           /* last tick: a new central pairing */
 
 /* Wear re-probe: while off-ear with live PPG demand, periodically lift
  * the wear veto so the sample-clocked detector can see re-wear (it
@@ -1107,17 +1108,32 @@ static void handle_tick(void)
      * dashboard"): a phone or PC that paired once reconnects in the
      * background, subscribes to nothing, and with one connection slot
      * keeps the real app out. Every client of ours subscribes within a
-     * second; OTA (both paths) is exempt. */
+     * second; OTA (both paths) is exempt. A NEW central still pairing
+     * (no bond yet, not encrypted) gets idle_kick_pair_s instead — its
+     * user may be reading the OS pairing prompt, and a kick there reads
+     * as a refused bond (v0.3.0-39) — and the countdown restarts when
+     * the pairing completes, so the app then gets its full idle_kick_s
+     * to subscribe. */
     {
-        const uint32_t kick_s = (uint32_t)nc_knob_get(KNOB_IDLE_KICK_S);
+        uint32_t kick_s = (uint32_t)nc_knob_get(KNOB_IDLE_KICK_S);
+        bool peer_bonded = false, encrypted = false;
+        ble_link_security(&peer_bonded, &encrypted);
+        const bool pairing = s_connected && !peer_bonded && !encrypted;
+        if (pairing) {
+            const uint32_t pair_s = (uint32_t)nc_knob_get(KNOB_IDLE_KICK_PAIR_S);
+            if (kick_s != 0 && pair_s > kick_s) {
+                kick_s = pair_s;
+            }
+        }
         const bool idle_link = s_connected && !sys_app_session() &&
                                s_state != NC_STATE_OTA && !dfu_legacy_active();
-        if (!idle_link || kick_s == 0) {
-            s_idle_link_since = now;
+        if (!idle_link || kick_s == 0 || (s_idle_pairing && !pairing)) {
+            s_idle_link_since = now;          /* busy, off, or just paired */
         } else if (now - s_idle_link_since >= (int64_t)kick_s * 1000000) {
             ble_kick();
             s_idle_link_since = now;          /* one try per period */
         }
+        s_idle_pairing = pairing;
     }
 
     ble_tx_power_poll();   /* a live ble_tx_dbm edit (knob) */

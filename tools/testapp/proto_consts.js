@@ -262,6 +262,7 @@ const PROTO = {
     { sym: "IND_BREATH_MS", id: 0x0009, name: "ind_breath_ms", type: 2, min: 600, max: 5000, def: 1500, unit: "ms", flags: 3 },
     { sym: "IDLE_KICK_S", id: 0x000A, name: "idle_kick_s", type: 2, min: 0, max: 600, def: 15, unit: "s", flags: 3 },
     { sym: "BLE_TX_DBM", id: 0x000B, name: "ble_tx_dbm", type: 3, min: -15, max: 20, def: 20, unit: "dBm", flags: 3 },
+    { sym: "IDLE_KICK_PAIR_S", id: 0x000C, name: "idle_kick_pair_s", type: 2, min: 15, max: 600, def: 60, unit: "s", flags: 3 },
     { sym: "PRESS_LONG_MS", id: 0x0101, name: "press_long_ms", type: 2, min: 500, max: 5000, def: 1500, unit: "ms", flags: 3 },
     { sym: "PRESS_DOUBLE_MS", id: 0x0102, name: "press_double_ms", type: 2, min: 200, max: 1000, def: 400, unit: "ms", flags: 3 },
     { sym: "PRESS_REBOOT_MS", id: 0x0103, name: "press_reboot_ms", type: 2, min: 4000, max: 15000, def: 8000, unit: "ms", flags: 3 },

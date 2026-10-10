@@ -37,6 +37,9 @@ void ble_kick(void);
 /* Apply the ble_tx_dbm knob if it changed since last applied (sys_task
  * 1 Hz tick; boot and every connection apply it unconditionally). */
 void ble_tx_power_poll(void);
+/* Current link: the peer was already bonded (or just bonded), and the link
+ * is encrypted. Both false when not connected. Any task. */
+void ble_link_security(bool *peer_bonded, bool *encrypted);
 void ble_get_conn_stats(uint16_t *mtu, uint8_t *phy, uint16_t *interval_1_25ms);
 
 /* Current ATT notification payload ceiling = min(negotiated MTU - 3,
