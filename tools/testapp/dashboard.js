@@ -240,7 +240,7 @@ const NarbisDashCore = (() => {
     "ro.btn": { sel: "#roBtn", after: true, text:
       "Live state of the side button, straight from the firmware. In this " +
       "functional-test firmware the button ONLY powers on (hold 1 s) and " +
-      "off (hold 5 s) — shorter presses do nothing except light this lamp, " +
+      "off (hold 3 s) — shorter presses do nothing except light this lamp, " +
       "which is exactly how you verify the switch works." },
     "ro.gatewear": { sel: "#roGate", after: true, text:
       "GATE lights when the firmware flags the PPG as unreliable — motion, " +

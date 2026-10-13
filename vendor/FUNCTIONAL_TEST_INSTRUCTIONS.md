@@ -36,7 +36,7 @@ the LED runs at a 1% optical duty cycle). No blink = board fails, set aside.
 ## 2. Button check (built into normal use)
 
 - **Power ON:** hold the side button **1 second** (from off).
-- **Power OFF:** hold the side button **5 seconds** (LED stops).
+- **Power OFF:** hold the side button **3 seconds** (LED stops).
 - Short presses do nothing else in this firmware. The dashboard shows a
   live "button pressed" indicator — you will verify the button during the
   test sequence.

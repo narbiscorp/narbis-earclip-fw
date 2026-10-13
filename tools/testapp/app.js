@@ -1285,7 +1285,7 @@ if (typeof document !== "undefined") (() => {
       async run(ctx) {
         ctx.instruct("<strong>Press the button 5 times</strong> — quick, " +
           "clean presses, <strong>under a second each</strong> (a long " +
-          "hold is the power-off gesture: 5 s in this build). Debounced " +
+          "hold is the power-off gesture: 3 s in this build). Debounced " +
           "edges stream back with µs timestamps — verifies SW3 and the " +
           "TVS/C22 net.");
         await ctx.race(ctrl("testButtonEcho", [1]));

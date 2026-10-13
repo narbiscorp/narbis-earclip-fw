@@ -31,6 +31,7 @@
 #include "driver/gpio.h"
 #include "esp_app_desc.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
 
 #include "acq.h"
@@ -52,6 +53,18 @@
 #include "narbis/nc_knobs.h"
 
 static const char *TAG = "main";
+
+#if NARBIS_TEST_MODE
+/* Button power-on (app_main): the ROM + 2nd-stage bootloader time of a
+ * deep-sleep wake, before the app can see the button. An estimate:
+ * power.c puts the whole wake-to-app latency at ~150-250 ms, and the
+ * bootloader re-validates the ~860 KB image on every wake
+ * (BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP is off). */
+#define TEST_WAKE_BOOT_MS      200
+/* However slow the boot, the held button is still watched this long:
+ * a tap must not power the board on. */
+#define TEST_WAKE_MIN_WATCH_MS 500
+#endif
 
 /* power.c teardown guards (see their definitions for semantics). */
 extern bool power_sensors_started;
@@ -108,10 +121,11 @@ void app_main(void)
 #if NARBIS_TEST_MODE
     /* Bench guard (first hardware, 2026-07-31): the production 1.5 s
      * hold-to-off kills the board mid-test — an operator's deliberate
-     * "distinct press" during the button-echo step easily exceeds it,
-     * and the vendor instructions promise 5 s. Force 5 s every boot of
-     * a TEST build (runtime value only; not persisted, knob editable). */
-    nc_knob_val[KNOB_PRESS_LONG_MS] = 5000;
+     * "distinct press" during the button-echo step easily exceeds it.
+     * Force 3 s every boot of a TEST build (runtime value only; not
+     * persisted, knob editable) to match TEST_OFF_HOLD_US in sys_task.c.
+     * It was 5 s until 2026-10-13, shortened at the user's request. */
+    nc_knob_val[KNOB_PRESS_LONG_MS] = 3000;
 #endif
     diag_init();
     ESP_ERROR_CHECK(power_init());
@@ -154,17 +168,30 @@ void app_main(void)
      * already configured input+pull-up); any release -> ghost, straight
      * back to sleep with the previous OFF policy. USB-powered cold
      * boots decode as PWR_BOOT_COLD, not BUTTON, so they never take
-     * this path — plugging a bench DUT in boots it without the hold. */
+     * this path — plugging a bench DUT in boots it without the hold.
+     *
+     * The 1 s counts from the PRESS (2026-10-13; it used to count from
+     * here, ~1.3 s in all): the finger has already been down for the
+     * ROM + bootloader (TEST_WAKE_BOOT_MS, an estimate: esp_timer
+     * restarts with the app, so that part cannot be measured here) and
+     * the app start so far (esp_timer). At least TEST_WAKE_MIN_WATCH_MS
+     * is still watched, so a tap stays a ghost. */
     if (cause == PWR_BOOT_BUTTON) {
-        for (int held_ms = 0; held_ms < 1000; held_ms += 10) {
+        const int app_ms = (int)(esp_timer_get_time() / 1000);
+        int watch_ms = 1000 - TEST_WAKE_BOOT_MS - app_ms;
+        if (watch_ms < TEST_WAKE_MIN_WATCH_MS) {
+            watch_ms = TEST_WAKE_MIN_WATCH_MS;
+        }
+        for (int held_ms = 0; held_ms < watch_ms; held_ms += 10) {
             vTaskDelay(pdMS_TO_TICKS(10));
             if (gpio_get_level(PIN_BUTTON) != 0) {
-                ESP_LOGW(TAG, "TEST boot: button released at %d ms — ghost",
-                         held_ms);
+                ESP_LOGW(TAG, "TEST boot: button released at %d of %d ms — ghost",
+                         held_ms, watch_ms);
                 power_enter_off(power_last_off_battery_forced());
             }
         }
-        ESP_LOGI(TAG, "TEST boot: 1 s hold confirmed");
+        ESP_LOGI(TAG, "TEST boot: hold confirmed (~%d ms boot + %d ms app start + %d ms watched)",
+                 TEST_WAKE_BOOT_MS, app_ms, watch_ms);
     }
 #endif
 
