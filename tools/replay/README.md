@@ -68,4 +68,5 @@ Beats found, by block (H10 = 100 %). "old" = 1.3's single threshold (`--knob 0x0
 
 False beats (earclip beats with no H10 match) stayed about the same (chew 12 → 13, talk 10 → 7
 on run 1). The beats found through motion are a little less precise: median interval error
-8–13 ms, p90 23–32 ms, against 7–8 / 16–18 ms at rest.
+7–13 ms, p90 18–32 ms, against 5–8 / 10–18 ms at rest (runs 1–2, replayed; the board's
+own live rest beats on run 1 were median 3–4 ms, 95–97 % within 10 ms).
