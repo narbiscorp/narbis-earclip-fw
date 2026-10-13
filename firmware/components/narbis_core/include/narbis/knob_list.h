@@ -122,6 +122,9 @@ X(IBI_THR_MIN,         0x0609, "ibi_thr_min",           NC_KNOB_I32,      1, 419
 /*   off BOTH the median of the last 5 accepted and the last accepted interval.    */ \
 X(IBI_ART_EN,          0x060A, "ibi_art_en",            NC_KNOB_BOOL,     0,      1,      1, "",      KPL) \
 X(IBI_ART_TOL_PCT,     0x060B, "ibi_art_tol_pct",       NC_KNOB_U8,       5,     50,     15, "%",     KPL) \
+/*   adaptive refractory (nc_ibi.c commit): after a beat, no new one for max(refract_ms, */ \
+/*   this % of the median clean interval); 0 = refract_ms only. Stops double counts.     */ \
+X(REFRACT_FRAC_PCT,    0x060C, "refract_frac_pct",      NC_KNOB_U8,       0,     80,     60, "%",     KPL) \
 /* -- artifact gate (0x07xx) -------------------------------------------------------- */ \
 X(GATE_EN,             0x0701, "gate_en",               NC_KNOB_BOOL,     0,      1,      1, "",      KPL) \
 X(GATE_ACC_WIN_MS,     0x0702, "gate_acc_win_ms",       NC_KNOB_U16,     50,   1000,    200, "ms",    KPL) \

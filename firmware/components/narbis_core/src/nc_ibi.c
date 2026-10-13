@@ -91,6 +91,7 @@ void nc_ibi_init(nc_ibi_t *s, uint32_t ts_us_measured)
     s->k_thr_min       = nc_knob_get(KNOB_IBI_THR_MIN);
     s->k_art_en        = nc_knob_get(KNOB_IBI_ART_EN) != 0;
     s->k_art_tol_pct   = (uint8_t)nc_knob_get(KNOB_IBI_ART_TOL_PCT);
+    s->k_refract_frac_pct = (uint8_t)nc_knob_get(KNOB_REFRACT_FRAC_PCT);
     nc_ibi_plaus_reset(&s->plaus);
     derive(s, ts_us_measured, true);
 }
@@ -270,6 +271,22 @@ static bool commit(nc_ibi_t *s, int64_t thr, nc_ibi_rec_t *out)
     }
     s->t_last_valid = true;
     s->t_last_us = t_beat;
+
+    /* Adaptive refractory: a double count (a second slope peak inside one
+     * pulse, from the dicrotic wave or from chewing/talking noise) lands at
+     * ~40-55 % of the interval, which the fixed refract_ms only covers at
+     * heart rates above ~107 bpm. So the next beat also waits out
+     * refract_frac_pct of the median CLEAN interval (the plausibility
+     * reference: flagged beats never enter it, so a double count cannot
+     * shorten its own guard). No reference yet (warm-up, after a gap):
+     * refract_ms alone. Measured on 2026-10-09 against an H10: chewing and
+     * talking read a median 570 ms against the strap's 750 ms. */
+    if (s->k_refract_frac_pct && s->plaus.n >= 3) {
+        const uint32_t med_ms = median_u16(s->plaus.ref, s->plaus.n);
+        const uint32_t adapt_ms = (med_ms * s->k_refract_frac_pct + 50u) / 100u;
+        const uint32_t adapt = smp_from_ms(adapt_ms, s->ts_us);
+        if (adapt > s->refract_cnt) s->refract_cnt = adapt;
+    }
 
     /* Trackers update on every accepted beat, emitted or not. The >> 2
      * on a possibly-negative delta relies on arithmetic right shift

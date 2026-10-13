@@ -314,6 +314,7 @@ const PROTO = {
     { sym: "IBI_THR_MIN", id: 0x0609, name: "ibi_thr_min", type: 3, min: 1, max: 4194304, def: 100, unit: "cnt", flags: 3 },
     { sym: "IBI_ART_EN", id: 0x060A, name: "ibi_art_en", type: 0, min: 0, max: 1, def: 1, unit: "", flags: 3 },
     { sym: "IBI_ART_TOL_PCT", id: 0x060B, name: "ibi_art_tol_pct", type: 1, min: 5, max: 50, def: 15, unit: "%", flags: 3 },
+    { sym: "REFRACT_FRAC_PCT", id: 0x060C, name: "refract_frac_pct", type: 1, min: 0, max: 80, def: 60, unit: "%", flags: 3 },
     { sym: "GATE_EN", id: 0x0701, name: "gate_en", type: 0, min: 0, max: 1, def: 1, unit: "", flags: 3 },
     { sym: "GATE_ACC_WIN_MS", id: 0x0702, name: "gate_acc_win_ms", type: 2, min: 50, max: 1000, def: 200, unit: "ms", flags: 3 },
     { sym: "GATE_ACC_THR", id: 0x0703, name: "gate_acc_thr", type: 3, min: 1, max: 1000000, def: 8000, unit: "cnt2", flags: 3 },

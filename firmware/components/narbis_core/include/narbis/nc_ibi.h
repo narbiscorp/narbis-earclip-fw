@@ -10,8 +10,9 @@
  * Algorithm (handoff §5.8): rectified derivative -> slope-sum (SSF) over
  * ssf_win_ms -> adaptive threshold = thr_frac x decaying peak tracker
  * (floor ibi_thr_min) -> peak capture with parabolic sub-sample timing
- * (interp_en) -> refractory refract_ms -> IBI range check
- * [ibi_min_ms, ibi_max_ms] -> confidence 0..100.
+ * (interp_en) -> refractory max(refract_ms, refract_frac_pct x the median
+ * clean interval) -> IBI range check [ibi_min_ms, ibi_max_ms] ->
+ * confidence 0..100.
  *
  * Knobs are read from the registry in nc_ibi_init() only (LIVE knob edits
  * take effect at the next init/reconfig). The MEASURED sample period is
@@ -94,6 +95,7 @@ typedef struct {
     bool     k_interp_en;
     bool     k_art_en;
     uint8_t  k_art_tol_pct;
+    uint8_t  k_refract_frac_pct; /* adaptive refractory, % of the median clean IBI */
     nc_ibi_plaus_t plaus;
 
     /* derivative + slope-sum */

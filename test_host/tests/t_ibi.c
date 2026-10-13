@@ -512,8 +512,106 @@ static void t_plaus_reanchors_on_real_change(void)
     for (int i = 0; i < 20; i++) CHECK(!nc_ibi_plaus_check(&p, 600, 15));
 }
 
+/* ---------------- adaptive refractory ------------------------------ */
+
+/* Talking or chewing in the middle of a session: from 20 s to 40 s every
+ * pulse carries a second slope peak at 55 % of the interval. Measured
+ * 2026-10-09 against an H10: chewing and talking read a median 570 ms
+ * against the strap's 750 ms. 80 bpm with a 6 % paced-breathing swing,
+ * 100 sps, 60 s, shipped thresholds. Truth = the systolic bump's centre.
+ *
+ * The clean first 20 s matter: the guard is a share of the median CLEAN
+ * interval, and a session that double-counts from its very first pulse
+ * never shows it one (it learns ~410 ms as the rate, and 60 % of that is
+ * inside refract_ms anyway) — a limit of this design, not covered here. */
+static void synth_double_hump(vec_t *v)
+{
+    memset(v, 0, sizeof *v);
+    v->ts_us = 10000;
+    v->nsamp = 6000;
+    v->bp = malloc((size_t)v->nsamp * sizeof *v->bp);
+    const double span_s = (double)v->nsamp * v->ts_us / 1e6;
+    for (double t = 0.5; t < span_s - 0.3 && v->nbeats < MAX_BEATS;) {
+        v->beats[v->nbeats++] = (int64_t)(t * 1e6);
+        t += 0.75 * (1.0 + 0.06 * sin(2.0 * 3.14159265358979323846 * 0.1 * t));
+    }
+    for (long i = 0; i < v->nsamp; i++) {
+        const double ti = (double)i * v->ts_us / 1e6;
+        double y = 0;
+        for (int k = 0; k < v->nbeats; k++) {
+            const double dt = ti - (double)v->beats[k] / 1e6;
+            if (dt < -0.5 || dt > 1.0) continue;
+            const double tb = (double)v->beats[k] / 1e6;
+            const double d2 = dt - 0.55 * 0.75;
+            y += 100000.0 * exp(-(dt * dt) / (2 * 0.06 * 0.06));
+            if (tb >= 20.0 && tb < 40.0) y += 70000.0 * exp(-(d2 * d2) / (2 * 0.05 * 0.05));
+        }
+        v->bp[i] = (int32_t)y;
+    }
+}
+
+/* The detector over [v] at the shipped knob defaults, with refract_frac_pct
+ * set to [frac] (0 = the fixed refract_ms only, as before 0x060C). */
+static int run_det_frac(const vec_t *v, int32_t frac)
+{
+    nc_knobs_init();
+    CHECK_EQ(nc_knob_set_id(0x060C /* refract_frac_pct */, frac), NC_ST_OK);
+    nc_ibi_t s;
+    nc_ibi_init(&s, v->ts_us);
+    int n = 0;
+    for (long i = 0; i < v->nsamp; i++) {
+        nc_ibi_rec_t r;
+        if (nc_ibi_update(&s, v->bp[i], T0_US + (uint64_t)i * v->ts_us, false, &r) && n < MAX_DETS) {
+            g_dets[n].t_us = r.t_beat_us;
+            g_dets[n].ibi_ms = r.ibi_ms;
+            g_dets[n].conf = r.confidence;
+            g_dets[n].flags = r.flags;
+            n++;
+        }
+    }
+    return n;
+}
+
+static void t_refract_adaptive_double_hump(void)
+{
+    vec_t v;
+    synth_double_hump(&v);
+    score_t sc;
+
+    /* Fixed 280 ms: the second hump is counted on (nearly) every talking pulse. */
+    int nd = run_det_frac(&v, 0);
+    score(&v, g_dets, nd, &sc);
+    fprintf(stderr, "  fixed refractory: matched %d/%d, dups %d, fp %d/%d\n",
+            sc.matched, sc.truth_n, sc.dups, sc.fp, sc.det_n);
+    CHECK(sc.fp >= 20);
+
+    /* Default 60 % of the median clean interval: one beat per pulse. */
+    nd = run_det_frac(&v, 60);
+    score(&v, g_dets, nd, &sc);
+    fprintf(stderr, "  adaptive refractory: matched %d/%d, dups %d, fp %d/%d\n",
+            sc.matched, sc.truth_n, sc.dups, sc.fp, sc.det_n);
+    CHECK(sc.matched * 1000 >= sc.truth_n * 980);
+    CHECK_EQ(sc.dups, 0);
+    CHECK(sc.fp * 50 < sc.det_n);
+    int artifact = 0;
+    for (int i = 0; i < nd; i++) artifact += (g_dets[i].flags & NC_IBIF_ARTIFACT) != 0;
+    CHECK(artifact * 50 < nd);           /* the pulses read clean, not flagged */
+    check_invariants(g_dets, nd, 300, 2000);
+    free(v.bp);
+}
+
+/* The adaptive guard must not cost a real beat when the rate climbs: the
+ * 180 bpm ramp (case c) still meets spec at the shipped 60 %. */
+static void t_refract_adaptive_keeps_fast_ramp(void)
+{
+    expect_case("ibi_c_100", 980, 200);
+    expect_case("ibi_c_500", 980, 200);
+}
+
 int main(void)
 {
+    TST_RUN(t_refract_adaptive_double_hump);
+    TST_RUN(t_refract_adaptive_keeps_fast_ramp);
     TST_RUN(t_plaus_steady_and_warmup);
     TST_RUN(t_plaus_double_and_missed);
     TST_RUN(t_plaus_paced_breathing_clean);

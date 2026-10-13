@@ -403,8 +403,9 @@ def test_knob_discover_chunk_roundtrip():
     # +2 standby (0x0008..0x0009), +3 ear posture (0x0804..0x0806),
     # +1 idle kick (0x000A), +2 plausibility (0x060A..0x060B),
     # +3 optimizer (0x0416..0x0418), +1 BLE TX power (0x000B),
-    # +1 AGC step compensation (0x0419), +1 pairing grace (0x000C)
-    assert chunk.total == 89
+    # +1 AGC step compensation (0x0419), +1 pairing grace (0x000C),
+    # +1 adaptive refractory (0x060C)
+    assert chunk.total == 90
     assert len(chunk.records) == 6
     wire = P.build_knob_discover_chunk(chunk)
     assert len(wire) == 225 <= P.ATT_PAYLOAD_MAX
