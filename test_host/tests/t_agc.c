@@ -619,6 +619,13 @@ static void test_unclean_beats_do_not_lock(void)
     CHECK_EQ(drive(&s, &p, acts), 0);
     CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);
 
+    /* So does a beat found through light motion (1.4; gated in 1.3):
+     * the 5 clean above and 5 below are not 6. */
+    nc_agc_on_beat(&s, 800, NC_IBIF_MOTION, p.now);
+    for (int i = 0; i < 5; i++) nc_agc_on_beat(&s, 800, 0, p.now);
+    CHECK_EQ(drive(&s, &p, acts), 0);
+    CHECK_EQ(s.state, NC_AGC_ST_ACQUIRE);
+
     /* A gap restart (ibi 0) also breaks it; six clean in a row lock. */
     nc_agc_on_beat(&s, 0, NC_IBIF_FIRST_AFTER_GAP, p.now);
     for (int i = 0; i < 6; i++) nc_agc_on_beat(&s, 800, 0, p.now);

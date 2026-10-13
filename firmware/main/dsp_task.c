@@ -604,6 +604,11 @@ static void dsp_process(const nc_ppg_sample_t *s)
     uint8_t reason = 0;
     bool gated = nc_gate_update(&s_gate, &gin, (uint32_t)(s->t_us / 1000u),
                                 &reason);
+    /* Light motion (proto 1.4): detected through, annotated, not gated. */
+    const bool motion = nc_gate_motion(&s_gate);
+    if (motion) {
+        nc_ibi_note_motion(&s_ibi);
+    }
     if (gated != s_prev_gated) {
         s_prev_gated = gated;
         /* sys_task is the single NC_EV_GATE emitter and the sole writer
@@ -616,6 +621,7 @@ static void dsp_process(const nc_ppg_sample_t *s)
     }
     atomic_store(&g_acq_batch_bits,
                  (uint8_t)((gated ? NC_PPGF_GATE : 0u) |
+                           (motion ? NC_PPGF_MOTION : 0u) |
                            (settling ? NC_PPGF_AGC_SETTLING : 0u)));
 
     /* Console tap: raw frames, as queued. */

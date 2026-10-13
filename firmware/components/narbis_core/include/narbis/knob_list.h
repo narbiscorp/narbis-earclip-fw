@@ -133,6 +133,12 @@ X(SAT_PCT,             0x0704, "sat_pct",               NC_KNOB_U8,      80,    
 X(STEP_SIGMA_X10,      0x0705, "step_sigma_x10",        NC_KNOB_U8,      10,    100,     40, "x0.1",  KPL) \
 X(GATE_COLLAPSE_PCT,   0x0706, "gate_amp_collapse_pct", NC_KNOB_U8,       5,     90,     30, "%",     KPL) \
 X(GATE_RELEASE_MS,     0x0707, "gate_release_ms",       NC_KNOB_U16,      0,   5000,    500, "ms",    KPL) \
+/*   two-level motion: accel energy over gate_acc_thr but under this is LIGHT motion    */ \
+/*   (chewing, talking, a foot tap): detected through, beats flagged MOTION; over it the */ \
+/*   gate closes. <= gate_acc_thr restores the single threshold (every motion gates).    */ \
+/*   200 k: 3 guided H10 runs peaked at 359 k chewing / talking (p99 20-193 k), clip     */ \
+/*   removal reads 0.87-4.5 M; replayed, chew/talk beats found 32-51 % -> 81-92 %.       */ \
+X(GATE_ACC_HARD_THR,   0x0708, "gate_acc_hard_thr",     NC_KNOB_I32,      1, 50000000, 200000, "cnt2",  KPL) \
 /* -- accelerometer (0x08xx) -------------------------------------------------------- */ \
 X(ACC_ODR,             0x0801, "acc_odr",               NC_KNOB_U8,       0,      5,      2, "code",  KPS) \
 X(ACC_FS,              0x0802, "acc_fs",                NC_KNOB_U8,       0,      3,      1, "code",  KPS) \

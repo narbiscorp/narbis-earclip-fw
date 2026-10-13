@@ -404,8 +404,8 @@ def test_knob_discover_chunk_roundtrip():
     # +1 idle kick (0x000A), +2 plausibility (0x060A..0x060B),
     # +3 optimizer (0x0416..0x0418), +1 BLE TX power (0x000B),
     # +1 AGC step compensation (0x0419), +1 pairing grace (0x000C),
-    # +1 adaptive refractory (0x060C)
-    assert chunk.total == 90
+    # +1 adaptive refractory (0x060C), +1 hard motion threshold (0x0708)
+    assert chunk.total == 91
     assert len(chunk.records) == 6
     wire = P.build_knob_discover_chunk(chunk)
     assert len(wire) == 225 <= P.ATT_PAYLOAD_MAX
@@ -487,7 +487,7 @@ def test_uuid_construction():
 
 
 def test_constants_spot_checks():
-    assert P.PROTO_VER == 0x0103
+    assert P.PROTO_VER == 0x0104
     assert P.OP_KNOB_DISCOVER == 0x14 and P.OP_TEST_REPORT == 0xEA
     assert P.FACTORY_MAGIC == 0x4E415242
     assert P.RATE_SPS[P.RATE_250] == 250 and P.rate_sps(99) == 0

@@ -24,13 +24,29 @@ static void test_truth_table(void)
     uint8_t m;
     nc_gate_t g;
 
-    /* Default gate_acc_thr = 8000: >= gates, below does not. */
+    /* Defaults (1.4): gate_acc_hard_thr = 200000 gates, gate_acc_thr = 8000
+     * up to it is light motion — not gated; below 8000 is still. */
+    nc_gate_init(&g);
+    CHECK(upd(&g, 200000, 0, 0, 0, 0, 0, 0, &m));
+    CHECK_EQ(m, NC_GATE_REASON_ACCEL);
+    nc_gate_init(&g);
+    CHECK(!upd(&g, 199999, 0, 0, 0, 0, 0, 0, &m));
+    CHECK_EQ(m, 0);
+    CHECK(nc_gate_motion(&g));
+    nc_gate_init(&g);
+    CHECK(!upd(&g, 7999, 0, 0, 0, 0, 0, 0, &m));
+    CHECK(!nc_gate_motion(&g));
+
+    /* Single threshold (hard <= soft, the 1.3 behaviour): >= 8000 gates. */
+    CHECK_EQ(nc_knob_set_id(0x0708, 1), NC_ST_OK);
     nc_gate_init(&g);
     CHECK(upd(&g, 8000, 0, 0, 0, 0, 0, 0, &m));
     CHECK_EQ(m, NC_GATE_REASON_ACCEL);
+    CHECK(!nc_gate_motion(&g));
     nc_gate_init(&g);
     CHECK(!upd(&g, 7999, 0, 0, 0, 0, 0, 0, &m));
     CHECK_EQ(m, 0);
+    nc_knobs_init();
 
     struct { int which; uint8_t bit; } cases[] = {
         { 0, NC_GATE_REASON_SAT },
@@ -53,7 +69,7 @@ static void test_truth_table(void)
 
     /* Simultaneous reasons OR into the mask. */
     nc_gate_init(&g);
-    CHECK(upd(&g, 10000, 1, 0, 0, 0, 1, 0, &m));
+    CHECK(upd(&g, 250000, 1, 0, 0, 0, 1, 0, &m));
     CHECK_EQ(m, NC_GATE_REASON_ACCEL | NC_GATE_REASON_SAT |
                 NC_GATE_REASON_WEAR);
 }
@@ -119,6 +135,45 @@ static void test_acc_thr_knob(void)
     CHECK(!upd(&g, 400000, 0, 0, 0, 0, 0, 0, &m));
     CHECK(upd(&g, 500000, 0, 0, 0, 0, 0, 600, &m));
     CHECK_EQ(m, NC_GATE_REASON_ACCEL);
+    nc_knobs_init();
+}
+
+/* Two-level motion (1.4): light motion annotates and holds for the release
+ * time like the gate; it never gates, never shows while gated, and the
+ * master switch clears it. Chewing / talking peaked at 359 k in three
+ * guided H10 runs; 200 k is the default hard threshold. */
+static void test_two_level_motion(void)
+{
+    nc_knobs_init();                 /* soft 8000, hard 200000, release 500 */
+    uint8_t m;
+    nc_gate_t g;
+    nc_gate_init(&g);
+
+    CHECK(!upd(&g, 50000, 0, 0, 0, 0, 0, 1000, &m));  /* a chew          */
+    CHECK(nc_gate_motion(&g));
+    CHECK(!upd(&g, 300, 0, 0, 0, 0, 0, 1400, &m));    /* still: tail     */
+    CHECK(nc_gate_motion(&g));
+    CHECK(!upd(&g, 300, 0, 0, 0, 0, 0, 1501, &m));    /* tail over       */
+    CHECK(!nc_gate_motion(&g));
+
+    /* Hard motion gates, and is not reported as light motion meanwhile. */
+    CHECK(upd(&g, 50000, 0, 0, 0, 0, 0, 2000, &m) == false);
+    CHECK(upd(&g, 900000, 0, 0, 0, 0, 0, 2100, &m));  /* clip off        */
+    CHECK_EQ(m, NC_GATE_REASON_ACCEL);
+    CHECK(!nc_gate_motion(&g));
+
+    /* Light motion with another reason active: gated by that reason. */
+    nc_gate_init(&g);
+    CHECK(upd(&g, 50000, 1, 0, 0, 0, 0, 3000, &m));
+    CHECK_EQ(m, NC_GATE_REASON_SAT);
+    CHECK(!nc_gate_motion(&g));
+
+    /* Master off clears it. */
+    nc_gate_init(&g);
+    CHECK(!upd(&g, 50000, 0, 0, 0, 0, 0, 4000, &m));
+    CHECK_EQ(nc_knob_set_id(0x0701, 0), NC_ST_OK);
+    CHECK(!upd(&g, 50000, 0, 0, 0, 0, 0, 4001, &m));
+    CHECK(!nc_gate_motion(&g));
     nc_knobs_init();
 }
 
@@ -279,9 +334,9 @@ static void test_build_input(void)
     CHECK_EQ(in.acc_energy, 123);
 
     /* Step flows through the builder into the flag + full passthrough. */
-    nc_gate_build_input(&in, &ds, 9999, 160000, true, true, true, true);
+    nc_gate_build_input(&in, &ds, 250000, 160000, true, true, true, true);
     CHECK(in.dc_step);
-    CHECK_EQ(in.acc_energy, 9999);
+    CHECK_EQ(in.acc_energy, 250000);   /* over the hard threshold: ACCEL */
     CHECK(in.sat && in.amp_collapse && in.agc_settling && in.wear_off);
 
     /* Builder output drives the gate with the full OR-mask. */
@@ -301,6 +356,7 @@ int main(void)
     TST_RUN(test_release_timing);
     TST_RUN(test_master_enable);
     TST_RUN(test_acc_thr_knob);
+    TST_RUN(test_two_level_motion);
     TST_RUN(test_accel_quiet_vs_shake);
     TST_RUN(test_accel_window_clamp);
     TST_RUN(test_dcstep_warmup_guard);

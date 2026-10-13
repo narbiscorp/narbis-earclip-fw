@@ -31,9 +31,12 @@ static bool mode_optimize(void)
  * NOT INTERPOLATED: nc_ibi sets it whenever the parabolic sub-sample
  * peak refinement succeeds, i.e. on nearly every good beat. Counting it
  * as unclean meant real beats could never lock, nor hold off a drift
- * re-acquire (first hardware run, 2026-10-09). */
+ * re-acquire (first hardware run, 2026-10-09).
+ * MOTION (1.4): light motion used to gate, so its beats never counted
+ * here; they still don't, and the AGC runs as it did in 1.3. */
 #define AGC_UNCLEAN_IBIF (NC_IBIF_GATED_CTX | NC_IBIF_AGC_SETTLING | \
-                          NC_IBIF_FIRST_AFTER_GAP | NC_IBIF_ARTIFACT)
+                          NC_IBIF_FIRST_AFTER_GAP | NC_IBIF_ARTIFACT | \
+                          NC_IBIF_MOTION)
 
 int nc_agc_rf_rank(uint8_t rf_code)
 {

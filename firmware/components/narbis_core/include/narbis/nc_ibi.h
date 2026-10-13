@@ -117,6 +117,9 @@ typedef struct {
     uint64_t t_peak_us;
     uint32_t refract_cnt;
 
+    /* light motion since the last committed beat (nc_ibi_note_motion) */
+    bool     motion_since_beat;
+
     /* beat/interval context */
     bool     t_last_valid;
     uint64_t t_last_us;
@@ -139,6 +142,10 @@ void nc_ibi_set_ts(nc_ibi_t *s, uint32_t ts_us_measured);
  * capture timestamp; gated is the artifact-gate flag for this sample. */
 bool nc_ibi_update(nc_ibi_t *s, int32_t bp, uint64_t t_us, bool gated,
                    nc_ibi_rec_t *out);
+
+/* Light motion this sample (nc_gate_motion): the next emitted beat carries
+ * NC_IBIF_MOTION — found through motion that did not gate (proto 1.4). */
+static inline void nc_ibi_note_motion(nc_ibi_t *s) { s->motion_since_beat = true; }
 
 /* AGC step compensation (nc_agcstep.h). nc_ibi_scale: the band-passed
  * input just changed scale by r (Q16, 1/8..8) — the derivative ring, SSF,

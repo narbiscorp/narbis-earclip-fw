@@ -39,14 +39,31 @@ typedef struct {
     bool     have_active;    /* last_active_ms/latched_mask valid      */
     uint8_t  latched_mask;
     uint32_t last_active_ms;
+    /* Light motion (gate_acc_thr <= energy < gate_acc_hard_thr): annotation
+     * only, held for gate_release_ms like the gate itself. */
+    bool     motion;
+    bool     have_motion;
+    uint32_t last_motion_ms;
 } nc_gate_t;
 
 void nc_gate_init(nc_gate_t *g);
 
 /* Returns gated; *reason_out (NULL ok) gets the active reason mask,
- * the latched mask during the release tail, 0 when ungated. */
+ * the latched mask during the release tail, 0 when ungated.
+ *
+ * Two-level motion (proto 1.4): accel energy at or over gate_acc_hard_thr
+ * gates (reason ACCEL); over gate_acc_thr but under the hard threshold is
+ * LIGHT motion — chewing, talking, a foot tap — which does not gate: the
+ * detector keeps finding beats and flags them MOTION (nc_gate_motion). In
+ * three guided H10 recordings every chewing / talking / foot-tap gate was
+ * ACCEL, and replaying them ungated found 85-92 % of the beats against
+ * 34-60 % gated. gate_acc_hard_thr <= gate_acc_thr is the single threshold
+ * of 1.3 (every accel trip gates). */
 bool nc_gate_update(nc_gate_t *g, const nc_gate_in_t *in,
                     uint32_t now_ms, uint8_t *reason_out);
+
+/* Light motion now (or inside its release tail), and not gated. */
+bool nc_gate_motion(const nc_gate_t *g);
 
 /* ------------------------------------------------------------------ */
 /* Accel window energy                                                 */

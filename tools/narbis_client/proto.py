@@ -28,9 +28,10 @@ from typing import List, Optional, Tuple, Union
 # ------------------------------------------------------------------ #
 
 PROTO_VER_MAJOR = 1
-PROTO_VER_MINOR = 3  # 1.1: +TEST_LED_SWEEP_CONT, STATUS btn_pressed
+PROTO_VER_MINOR = 4  # 1.1: +TEST_LED_SWEEP_CONT, STATUS btn_pressed
 #                      1.2: +EV_AGC_STATE, STATUS agc_state/agc_reacq_count
 #                      1.3: +IBI flag ARTIFACT
+#                      1.4: +PPG flag MOTION, IBI flag MOTION (light motion, not gated)
 PROTO_VER = (PROTO_VER_MAJOR << 8) | PROTO_VER_MINOR
 
 # ATT payload budget at MTU 247
@@ -100,6 +101,7 @@ PPGF_RATE_CHANGED = 1 << 3
 PPGF_AMB = 1 << 4          # amb field present in batch
 PPGF_WEAR_OFF = 1 << 5
 PPGF_CLIPPED = 1 << 6      # >=1 sample near rail
+PPGF_MOTION = 1 << 7       # proto 1.4: light motion, detected through, not gated
 
 _PPG_HDR = struct.Struct("<IQBBB")
 assert _PPG_HDR.size == PPG_HDR_SIZE
@@ -222,6 +224,7 @@ IBIF_AGC_SETTLING = 1 << 1
 IBIF_INTERPOLATED = 1 << 2
 IBIF_FIRST_AFTER_GAP = 1 << 3
 IBIF_ARTIFACT = 1 << 4      # proto 1.3: failed the on-device plausibility check
+IBIF_MOTION = 1 << 5        # proto 1.4: found during light motion (not gated)
 
 _IBI_HDR = struct.Struct("<IB")
 _IBI_REC = struct.Struct("<QHBB")

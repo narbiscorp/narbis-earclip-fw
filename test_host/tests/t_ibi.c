@@ -600,6 +600,31 @@ static void t_refract_adaptive_double_hump(void)
     free(v.bp);
 }
 
+/* Light motion (proto 1.4): a beat found after nc_ibi_note_motion carries
+ * MOTION, exactly once; motion never stops the detector. */
+static void t_motion_flag_marks_the_next_beat(void)
+{
+    vec_t v;
+    synth_double_hump(&v);               /* only the clean first 20 s are used */
+    nc_knobs_init();
+    nc_ibi_t s;
+    nc_ibi_init(&s, v.ts_us);
+    int before = 0, flagged = 0, after = 0, after_flagged = 0;
+    for (long i = 0; i < 2000; i++) {    /* 0..20 s */
+        if (i == 1000) nc_ibi_note_motion(&s);   /* a chew at 10 s */
+        nc_ibi_rec_t r;
+        if (!nc_ibi_update(&s, v.bp[i], T0_US + (uint64_t)i * v.ts_us, false, &r)) continue;
+        if (i < 1000) { before++; CHECK(!(r.flags & NC_IBIF_MOTION)); }
+        else if (!flagged) { flagged = 1; CHECK(r.flags & NC_IBIF_MOTION); CHECK(r.ibi_ms > 0); }
+        else { after++; after_flagged += (r.flags & NC_IBIF_MOTION) != 0; }
+    }
+    CHECK(before >= 10);
+    CHECK(flagged);
+    CHECK(after >= 10);
+    CHECK_EQ(after_flagged, 0);
+    free(v.bp);
+}
+
 /* The adaptive guard must not cost a real beat when the rate climbs: the
  * 180 bpm ramp (case c) still meets spec at the shipped 60 %. */
 static void t_refract_adaptive_keeps_fast_ramp(void)
@@ -612,6 +637,7 @@ int main(void)
 {
     TST_RUN(t_refract_adaptive_double_hump);
     TST_RUN(t_refract_adaptive_keeps_fast_ramp);
+    TST_RUN(t_motion_flag_marks_the_next_beat);
     TST_RUN(t_plaus_steady_and_warmup);
     TST_RUN(t_plaus_double_and_missed);
     TST_RUN(t_plaus_paced_breathing_clean);

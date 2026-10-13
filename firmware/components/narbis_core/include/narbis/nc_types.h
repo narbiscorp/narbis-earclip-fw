@@ -136,6 +136,7 @@ typedef struct {
 #define NC_PPGF_AMB           (1u << 4)  /* amb field present in batch  */
 #define NC_PPGF_WEAR_OFF      (1u << 5)
 #define NC_PPGF_CLIPPED       (1u << 6)  /* >=1 sample near rail        */
+#define NC_PPGF_MOTION        (1u << 7)  /* light motion, not gated (nc_gate.h); 1.4 */
 
 /* IBI record flag bits */
 #define NC_IBIF_GATED_CTX     (1u << 0)
@@ -143,6 +144,7 @@ typedef struct {
 #define NC_IBIF_INTERPOLATED  (1u << 2)
 #define NC_IBIF_FIRST_AFTER_GAP (1u << 3)
 #define NC_IBIF_ARTIFACT      (1u << 4)  /* failed plausibility (nc_ibi.h); 1.3 */
+#define NC_IBIF_MOTION        (1u << 5)  /* found during light motion (nc_gate.h); 1.4 */
 
 /* ------------------------------------------------------------------ */
 /* Fixed-point helpers (no FPU on the C6 — hot paths are Q15/Q31/i64)  */

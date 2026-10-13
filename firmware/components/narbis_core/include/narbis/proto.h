@@ -21,10 +21,13 @@
 #include "narbis/nc_types.h"
 
 #define NC_PROTO_VER_MAJOR  1
-#define NC_PROTO_VER_MINOR  3   /* 1.1: +TEST_LED_SWEEP_CONT (additive)
+#define NC_PROTO_VER_MINOR  4   /* 1.1: +TEST_LED_SWEEP_CONT (additive)
                                    1.2: +EV_AGC_STATE, STATUS agc_state /
                                         agc_reacq_count (additive)
-                                   1.3: +IBI flag ARTIFACT (additive)   */
+                                   1.3: +IBI flag ARTIFACT (additive)
+                                   1.4: +PPG flag MOTION, IBI flag MOTION:
+                                        light motion detected through, not
+                                        gated (additive)                 */
 #define NC_PROTO_VER        ((NC_PROTO_VER_MAJOR << 8) | NC_PROTO_VER_MINOR)
 
 /* ------------------------------------------------------------------ */

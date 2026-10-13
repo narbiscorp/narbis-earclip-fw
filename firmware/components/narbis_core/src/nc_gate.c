@@ -20,14 +20,26 @@ bool nc_gate_update(nc_gate_t *g, const nc_gate_in_t *in,
         g->gated = false;
         g->have_active = false;
         g->latched_mask = 0;
+        g->motion = false;
+        g->have_motion = false;
         if (reason_out) *reason_out = 0;
         return false;
     }
 
     uint8_t m = 0;
-    /* gate_acc_thr knob range is 1..1e6 — always positive, u32-safe. */
-    if (in->acc_energy >= (uint32_t)nc_knob_get(KNOB_GATE_ACC_THR))
-        m |= NC_GATE_REASON_ACCEL;
+    /* Knob ranges are positive (1..1e6, 1..5e7) — u32-safe. */
+    const uint32_t soft = (uint32_t)nc_knob_get(KNOB_GATE_ACC_THR);
+    const uint32_t hard = (uint32_t)nc_knob_get(KNOB_GATE_ACC_HARD_THR);
+    if (in->acc_energy >= soft) {
+        if (hard <= soft || in->acc_energy >= hard) {
+            m |= NC_GATE_REASON_ACCEL;           /* hard motion: gate       */
+        } else {
+            g->have_motion = true;               /* light motion: annotate  */
+            g->last_motion_ms = now_ms;
+        }
+    }
+    const uint32_t release = (uint32_t)nc_knob_get(KNOB_GATE_RELEASE_MS);
+    g->motion = g->have_motion && (uint32_t)(now_ms - g->last_motion_ms) <= release;
     if (in->sat)          m |= NC_GATE_REASON_SAT;
     if (in->dc_step)      m |= NC_GATE_REASON_DC_STEP;
     if (in->amp_collapse) m |= NC_GATE_REASON_COLLAPSE;
@@ -46,8 +58,7 @@ bool nc_gate_update(nc_gate_t *g, const nc_gate_in_t *in,
     /* Release tail: hold until now >= last_active + release_ms.
      * u32 subtraction is wrap-safe across the 49-day rollover. */
     if (g->have_active &&
-        (uint32_t)(now_ms - g->last_active_ms) <
-            (uint32_t)nc_knob_get(KNOB_GATE_RELEASE_MS)) {
+        (uint32_t)(now_ms - g->last_active_ms) < release) {
         g->gated = true;
         if (reason_out) *reason_out = g->latched_mask;
         return true;
@@ -56,6 +67,11 @@ bool nc_gate_update(nc_gate_t *g, const nc_gate_in_t *in,
     g->gated = false;
     if (reason_out) *reason_out = 0;
     return false;
+}
+
+bool nc_gate_motion(const nc_gate_t *g)
+{
+    return g->motion && !g->gated;
 }
 
 /* ------------------------------------------------------------------ */

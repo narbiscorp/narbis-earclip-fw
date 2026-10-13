@@ -299,6 +299,7 @@ static bool commit(nc_ibi_t *s, int64_t thr, nc_ibi_rec_t *out)
 
     if (emit) {
         if (s->gated_since_beat) fl |= NC_IBIF_GATED_CTX;
+        if (s->motion_since_beat) fl |= NC_IBIF_MOTION;
         int conf = (int)(margin + consist) + plaus;
         if (conf < 0) conf = 0;
         if (conf > 100) conf = 100;
@@ -311,6 +312,7 @@ static bool commit(nc_ibi_t *s, int64_t thr, nc_ibi_rec_t *out)
         out->flags = fl;
     }
     s->gated_since_beat = false;
+    s->motion_since_beat = false;
     return emit;
 }
 
