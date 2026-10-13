@@ -999,6 +999,52 @@ if (typeof document !== "undefined") (() => {
     };
   }
 
+  /* Step 15's verdict, pure (selfcheck.mjs drives it). A warm, resting
+   * fingertip reads a few percent AC/DC on IR through the clip; under
+   * 0.3 % is a weak pulse (cold hand, poor seating) — reported, not a board
+   * fault. Light through the finger with no steady beats is the fault this
+   * step exists to catch, as is clipping. */
+  function fingertipVerdict({ sec, ibis, clipped, batches, gaps }) {
+    const median = (xs) => {
+      if (!xs.length) return null;
+      const v = [...xs].sort((a, b) => a - b);
+      return v[Math.floor(v.length / 2)];
+    };
+    const acdc = [];
+    let dcSum = 0, dcN = 0;
+    for (const s of sec.values()) {
+      if (s.n < 50) continue;                   /* a partial second */
+      const mean = s.sum / s.n;
+      if (mean <= 0) continue;
+      acdc.push((100 * (s.max - s.min)) / mean);
+      dcSum += mean;
+      dcN++;
+    }
+    const pulsePct = median(acdc);
+    const dc = dcN ? dcSum / dcN : null;
+    const clean = ibis.filter((r) => !(r.flags & (P.IBIF_ARTIFACT | P.IBIF_GATED_CTX)));
+    const ibiMed = median(clean.map((r) => r.ibiMs));
+    const hr = ibiMed ? 60000 / ibiMed : null;
+    const flaggedShare = ibis.length ? (ibis.length - clean.length) / ibis.length : 0;
+    const problems = [], notes = [];
+    if (batches === 0) problems.push("no PPG arrived");
+    if (dc != null && dc < 100000) problems.push(`little light through the finger (DC ${Math.round(dc)} counts)`);
+    if (clean.length < 15) problems.push(`only ${clean.length} clean beats in 30 s`);
+    if (hr != null && (hr < 40 || hr > 150)) problems.push(`heart rate ${hr.toFixed(0)} bpm, outside 40–150`);
+    if (clipped > 0) problems.push(`${clipped} clipped batches`);
+    if (pulsePct != null && pulsePct < 0.3) notes.push(`weak pulse (AC/DC ${pulsePct.toFixed(2)} %): warm the finger and reseat`);
+    if (flaggedShare > 0.2) notes.push(`${(100 * flaggedShare).toFixed(0)} % of beats flagged: keep the hand still`);
+    if (gaps > 0) notes.push(`${gaps} PPG sequence gaps`);
+    return {
+      result: problems.length ? "fail" : notes.length ? "info" : "pass",
+      value: `${clean.length} beats, ${hr != null ? hr.toFixed(0) + " bpm" : "no rate"}, ` +
+             `AC/DC ${pulsePct != null ? pulsePct.toFixed(2) + " %" : "—"}, ` +
+             `DC ${dc != null ? (dc / 1e6).toFixed(2) + " M" : "—"}`,
+      expected: "≥ 15 clean beats at 40–150 bpm, AC/DC ≥ 0.3 %, no clipping",
+      note: [...problems, ...notes].join("; "),
+    };
+  }
+
   const STEPS = [
     stepSelftest("1.", "T01 I2C bus scan", P.TEST_I2C_SCAN),
     stepSelftest("2.", "T02 WHO_AM_I (accel + AFE)", P.TEST_ACCEL_WHOAMI),
@@ -1438,7 +1484,79 @@ if (typeof document !== "undefined") (() => {
     },
 
     {
-      id: "sleep", name: "15. Sleep current + button wake", mode: "manual",
+      id: "finger", name: "15. Fingertip pulse quality (40 s)", mode: "manual",
+      async run(ctx) {
+        /* The smoke test above proves the link; this one proves the clip
+         * SEES A PULSE: a fingertip is the reference tissue (bright,
+         * well perfused, no ear needed), so a board that cannot find a
+         * steady heartbeat on one has an optical or analog fault. 10 s for
+         * the gain control and the beat detector to settle, then 30 s
+         * scored: beats with a plausible rate, the pulse's share of the
+         * light (AC/DC), and no clipping. */
+        ctx.instruct("<strong>Clip a fingertip</strong> (index finger, pad on " +
+          "the photodiode side) and rest the hand on the bench, relaxed and " +
+          "still. Warm fingers read best — rub them first if they are cold. " +
+          "10 s to settle, then 30 s are scored: beats found and their rate, " +
+          "pulse size (AC/DC) and clipping.");
+        await ctx.buttons([{ label: "Start", value: "go", kind: "primary" }]);
+        await ctx.race(ctrl("setRate", [P.RATE_100]));
+        const SETTLE_MS = 10000 * ctx.ts, SCORE_MS = 30000 * ctx.ts;
+        const scope = makeScope(6);
+        const sec = new Map();     /* second -> {sum, n, min, max} over IR */
+        let clipped = 0, batches = 0, gaps = 0, lastSeq = null;
+        const ibis = [];           /* {ibiMs, flags} scored */
+        let t0 = 0;
+        const scoring = () => {
+          const el = performance.now() - t0;
+          return el >= SETTLE_MS && el < SETTLE_MS + SCORE_MS;
+        };
+        const unsubP = await subscribe("ppg", (ev) => {
+          let b;
+          try { b = NP.parsePpg(ev.target.value); } catch (_) { return; }
+          if (S.sinks.ppg) S.sinks.ppg(b);
+        });
+        const unsubI = await subscribe("ibi", (ev) => {
+          let r;
+          try { r = NP.parseIbi(ev.target.value); } catch (_) { return; }
+          if (!scoring()) return;
+          for (const rec of r.records) {
+            if (rec.ibiMs > 0) ibis.push({ ibiMs: rec.ibiMs, flags: rec.flags });
+          }
+        });
+        ctx.setPpgSink((b) => {
+          if (lastSeq !== null && b.seq !== ((lastSeq + 1) >>> 0)) gaps++;
+          lastSeq = b.seq;
+          scope.push(b);
+          if (!scoring()) return;
+          batches++;
+          if (b.flags & P.PPGF_CLIPPED) clipped++;
+          const k = Math.floor((performance.now() - t0) / (1000 * ctx.ts));
+          const s = sec.get(k) || { sum: 0, n: 0, min: Infinity, max: -Infinity };
+          for (const v of b.ir) { s.sum += v; s.n++; if (v < s.min) s.min = v; if (v > s.max) s.max = v; }
+          sec.set(k, s);
+        });
+        t0 = performance.now();
+        ctx.every(150, () => {
+          scope.draw();
+          const el = performance.now() - t0;
+          const phase = el < SETTLE_MS ? `settling ${(el / ctx.ts / 1000).toFixed(0)} / 10 s`
+            : `scoring ${(Math.min(el - SETTLE_MS, SCORE_MS) / ctx.ts / 1000).toFixed(0)} / 30 s`;
+          readout(`${phase}   beats ${ibis.length}   clipped batches ${clipped}`);
+        });
+        await ctx.race(ctrl("streamStart", [P.STREAM_MASK_PPG | P.STREAM_MASK_IBI]));
+        try {
+          await ctx.sleep(SETTLE_MS + SCORE_MS);
+        } finally {
+          try { await ctrl("streamStop", [P.STREAM_MASK_PPG | P.STREAM_MASK_IBI]); } catch (_) {}
+          await unsubP();
+          await unsubI();
+        }
+        return fingertipVerdict({ sec, ibis, clipped, batches, gaps });
+      },
+    },
+
+    {
+      id: "sleep", name: "16. Sleep current + button wake", mode: "manual",
       async run(ctx) {
         ctx.instruct("Insert the <strong>µA meter</strong> in series with the " +
           "battery (or use the µCurrent adapter). On <b>Run</b>, the device " +
