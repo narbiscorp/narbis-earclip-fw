@@ -1,5 +1,6 @@
 firmware/build/
 firmware/build_factory/
+vendor/ota/
 firmware/sdkconfig
 firmware/sdkconfig.old
 firmware/managed_components/
@@ -11,3 +12,4 @@ __pycache__/
 tools/.venv/
 *.parquet
 recordings/
+*.egg-info/

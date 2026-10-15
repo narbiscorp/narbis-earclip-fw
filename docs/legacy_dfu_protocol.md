@@ -159,20 +159,24 @@ file's first 512 bytes:
 | `0x0C` | u16 LE | `chip_id` | must equal the device's chip-id (Edge `0x0000`, earclip `0x000D`) |
 | `0x20` | u32 LE | app-desc magic | must be `0xABCD5432` |
 | `0x30` | 32 B | version string | NUL-terminated ASCII (informational / downgrade check) |
-| `0x50` | 32 B | `project_name` | must start with the device's prefix (`ESP32_Ble` / `narbis_earclip`) |
+| `0x50` | 32 B | `project_name` | Edge: starts with `ESP32_Ble`; V1 earclip: `narbis_earclip`; V2.1 earclip: exactly `narbis_earclip_v2` |
 
 ---
 
 ## 8. Device table
 
-| | Edge glasses | Narbis earclip |
-|---|---|---|
-| Advertised name | `Smart_Glasses` **or** `Narbis_Edge` (exact) | starts with `Narbis Earclip` |
-| Chip | ESP32 (`chip_id 0x0000`) | ESP32-C6 (`chip_id 0x000D`) |
-| `project_name` prefix | `ESP32_Ble` | `narbis_earclip` |
-| Release repo | `narbiscorp/edge-firmware` | `narbiscorp/edge-earclip` |
-| Asset filename | `ESP32_Ble.bin` | `narbis_earclip.bin` |
-| OTA slot (max size) | 1.5 MB (`1572864`) | 1.25 MB (`1310720`) |
+| | Edge glasses | Narbis earclip V1 | Narbis earclip V2.1 (this repo) |
+|---|---|---|---|
+| Advertised name | `Smart_Glasses` **or** `Narbis_Edge` (exact) | starts with `Narbis Earclip` | starts with `Narbis Edge Earclip` (TEST builds: ends ` TEST`) |
+| Chip | ESP32 (`chip_id 0x0000`) | ESP32-C6 (`chip_id 0x000D`) | ESP32-C6 (`chip_id 0x000D`) |
+| `project_name` | prefix `ESP32_Ble` | `narbis_earclip` | `narbis_earclip_v2` (since 2026-10-14; earlier V2.1 builds were `narbis_earclip`) |
+| Release repo | `narbiscorp/edge-firmware` | `narbiscorp/edge-earclip` (minus tags `functest-*`, which are V2.1) | `narbiscorp/narbis-earclip-fw` (pre-releases, tags `functest-<version>`) |
+| Asset filename | `ESP32_Ble.bin` | `narbis_earclip.bin` | TEST build `narbis_earclip_v2_functest.bin`; production `narbis_earclip_v2.bin` |
+| OTA slot (max size) | 1.5 MB (`1572864`) | 1.25 MB (`1310720`) | 1.6 MB (`1638400`) |
+
+The V2.1 device checks the identity itself too (`dfu_image_hdr_ok`, ERROR
+`0x07`), so a V1 image cannot land on V2.1 hardware. A V2.1 board running
+a build from before the rename accepts anything starting `narbis_earclip`.
 
 ---
 

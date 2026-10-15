@@ -41,11 +41,17 @@ void dfu_legacy_on_disconnect(void);
  * sys_task (holds NC_STATE_OTA so acquisition stays stopped). */
 bool dfu_legacy_active(void);
 
+/* Value handle of FF03 STATUS (0 before registration). ble_gatt.c's
+ * SUBSCRIBE handler uses it: a central subscribed to FF03 is the web
+ * updater, an app session like any other (no idle kick, no standby
+ * auto-off while it waits for the user to pick a release). */
+uint16_t dfu_legacy_status_handle(void);
+
 /* Shared §7 image-identity check (both OTA directions use it):
- * hdr = first bytes of the image; needs at least 0x5E bytes.
+ * hdr = first bytes of the image; needs at least 0x62 bytes.
  *   [0x00] u8    ESP image magic          == 0xE9
  *   [0x0C] u16LE chip_id                  == 0x000D (ESP32-C6)
  *   [0x20] u32LE esp_app_desc magic       == 0xABCD5432
- *   [0x50] char  project_name             starts "narbis_earclip"
+ *   [0x50] char  project_name             == "narbis_earclip_v2"
  */
 bool dfu_image_hdr_ok(const uint8_t *hdr, size_t len);

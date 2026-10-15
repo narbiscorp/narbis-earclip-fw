@@ -34,7 +34,7 @@ if ($orig -notmatch '#define NARBIS_TEST_MODE 0') {
 # vendor\ is THIS script's own output — a stale bin/txt from the previous
 # build must not mark the SOURCE dirty (it did: every commit-then-rebuild
 # cycle stamped dirty until vendor\ was also committed).
-$ver = git -C $repo describe --tags --always
+$ver = git -C $repo describe --tags --always --match 'v[0-9]*'   # as CMakeLists.txt
 $dirty = git -C $repo status --porcelain -- ':!vendor'
 if ($dirty) { $ver = "$ver-dirty" }
 $outName = if ($Bench) { 'narbis-earclip-bench' } else { 'narbis-earclip-functest' }
@@ -55,7 +55,15 @@ try {
     $flags = if ($Bench) { 'NARBIS_TEST_MODE=1 BENCH=1' } else { 'NARBIS_TEST_MODE=1' }
     Set-Content (Join-Path $vendor ($outName + '.version.txt')) `
         "$($outName).bin  |  $ver  |  built $(Get-Date -Format s)  |  $flags"
-    Write-Host "OK -> vendor\$($outName).bin ($ver)"
+    # The APP image of the same build, for BLE OTA (web updater / testapp /
+    # narbis-ota). Not committed (vendor\ota\ is gitignored): it ships as a
+    # GitHub release asset, tools\publish_ota_release.ps1.
+    $otaDir = Join-Path $vendor 'ota'
+    New-Item -ItemType Directory -Force $otaDir | Out-Null
+    $otaName = if ($Bench) { 'narbis_earclip_v2_bench.bin' } else { 'narbis_earclip_v2_functest.bin' }
+    Copy-Item (Join-Path $bdir 'narbis_earclip_v2.bin') (Join-Path $otaDir $otaName) -Force
+    Set-Content (Join-Path $otaDir ($otaName + '.version.txt')) "$otaName  |  $ver  |  $flags"
+    Write-Host "OK -> vendor\$($outName).bin + vendor\ota\$otaName ($ver)"
 }
 finally {
     Set-Content $board $orig -NoNewline

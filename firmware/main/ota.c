@@ -286,7 +286,7 @@ static void op_finish(uint8_t tid)
 
     /* 2b. Model lock (legacy DFU doc §7, shared dfu_image_hdr_ok):
      * re-read the WRITTEN first 512 B and require magic 0xE9, chip_id
-     * 0x000D and project_name "narbis_earclip". A CRC-correct transfer
+     * 0x000D and project_name "narbis_earclip_v2". A CRC-correct transfer
      * of the wrong build (e.g. an Edge-glasses image) fails here before
      * the boot partition ever switches. */
     bool id_ok = false;

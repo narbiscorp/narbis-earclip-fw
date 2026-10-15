@@ -20,7 +20,7 @@
  *      during FINISH (0xA9), then esp_ota_end + set_boot_partition +
  *      SUCCESS + reboot 500 ms later. 0xAA CANCEL aborts.
  *  §7  page-0 identity check BEFORE the first flash write (magic 0xE9,
- *      chip_id 0x000D, app-desc magic, project_name "narbis_earclip"),
+ *      chip_id 0x000D, app-desc magic, project_name "narbis_earclip_v2"),
  *      else ERROR 0x07. Runs after the CRC handshake confirmed the
  *      bytes, so a corrupted transfer resends instead of failing 0x07.
  *  §10 the peripheral requests a 32 s supervision timeout for the
@@ -98,11 +98,13 @@ static const char *TAG = "dfu_leg";
 
 /* Session conn params (§10): slow interval, 32 s supervision timeout so
  * the begin-erase stall cannot kill the link. Normal = ble_gatt.c's
- * slow/idle policy (30-50 ms, 4 s) reapplied on session end. */
+ * slow/idle policy (30-50 ms, CONN_TIMEOUT_10MS 8 s) reapplied on
+ * session end. */
 #define DFU_ITVL_MIN        24      /* 30 ms, 1.25 ms units */
 #define DFU_ITVL_MAX        40      /* 50 ms */
 #define DFU_TIMEOUT_10MS    3200    /* 32 s */
-#define NORM_TIMEOUT_10MS   400     /* 4 s  */
+#define NORM_TIMEOUT_10MS   800     /* 8 s (was 4 s, before ble_gatt.c's
+                                       went to 8 s on 2026-08-04) */
 
 /* ------------------------------------------------------------------ */
 /* Engine state — NimBLE host task only (see file header)              */
@@ -136,9 +138,18 @@ static uint8_t s_data_buf[NC_ATT_PAYLOAD_MAX];
 /* ------------------------------------------------------------------ */
 /* §7 image identity — shared with ota.c's model lock                  */
 /* ------------------------------------------------------------------ */
+/* The V2.1 project name, NUL included: an exact match. Until 2026-10-14
+ * (v0.3.0-50) the project was "narbis_earclip", the same name and chip
+ * as the V1 (MAX3010x) earclip firmware in edge-earclip, so the old
+ * 14-byte prefix check let a V1 image onto V2.1 hardware. Boards on
+ * those builds still accept this one (it starts with their prefix);
+ * from here on only V2.1 images pass, and pre-rename V2.1 builds go
+ * back over USB. */
+static const char k_project[] = "narbis_earclip_v2";
+
 bool dfu_image_hdr_ok(const uint8_t *h, size_t len)
 {
-    if (h == NULL || len < 0x50 + 14) {
+    if (h == NULL || len < 0x50 + sizeof(k_project)) {
         return false;
     }
     if (h[0x00] != 0xE9) {
@@ -153,7 +164,7 @@ bool dfu_image_hdr_ok(const uint8_t *h, size_t len)
     if (am != 0xABCD5432u) {
         return false;                          /* esp_app_desc magic */
     }
-    return memcmp(h + 0x50, "narbis_earclip", 14) == 0;
+    return memcmp(h + 0x50, k_project, sizeof(k_project)) == 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -650,4 +661,9 @@ void dfu_legacy_on_disconnect(void)
 bool dfu_legacy_active(void)
 {
     return s_active;
+}
+
+uint16_t dfu_legacy_status_handle(void)
+{
+    return s_vh_status;
 }

@@ -435,10 +435,21 @@ if (typeof document !== "undefined") (() => {
     const image = new Uint8Array(await file.arrayBuffer());
     if (image.length < 1024) throw new Error("that is not a firmware image");
     /* ESP app images start 0xE9 (also true of merged factory images —
-     * refuse those: OTA takes the APP image, narbis_earclip.bin only). */
+     * refuse those: OTA takes the APP image, narbis_earclip_v2.bin only). */
     if (image[0] !== 0xE9) {
       throw new Error("not an ESP application image (expected " +
-                      "firmware/build/narbis_earclip.bin)");
+                      "firmware/build/narbis_earclip_v2.bin)");
+    }
+    /* The device's own identity check (dfu_image_hdr_ok) only runs at
+     * FINISH, after the whole transfer: say it up front. App descriptor
+     * magic at 0x20, project_name at 0x50. */
+    const dv = new DataView(image.buffer, image.byteOffset, image.length);
+    const proj = new TextDecoder().decode(image.subarray(0x50, 0x70)).split("\0")[0];
+    if (dv.getUint32(0x20, true) !== 0xABCD5432 || proj !== "narbis_earclip_v2") {
+      throw new Error(`not a V2.1 earclip app image (project "${proj}", ` +
+                      "expected narbis_earclip_v2 — a merged factory image, " +
+                      "a V1 earclip or a V2.1 build from before " +
+                      "2026-10-14?)");
     }
     const crc = NP.ota.crc32(0, image);
     const fwBefore = S.dis.fw || "?";

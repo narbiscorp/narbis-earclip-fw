@@ -15,7 +15,7 @@ chain — there is nothing separate to "add":
 | 0x0 | `bootloader.bin` | 2nd-stage bootloader, built with **rollback support** (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`) |
 | 0x8000 | `partition-table.bin` | the map below |
 | 0xf000 | `ota_data_initial.bin` | which app slot boots (the bootloader's A/B switch) |
-| 0x20000 | `narbis_earclip.bin` → **ota_0** | app slot A (1.6 MB) |
+| 0x20000 | `narbis_earclip_v2.bin` → **ota_0** | app slot A (1.6 MB) |
 | 0x1B0000 | — → **ota_1** | app slot B (1.6 MB, filled by OTA) |
 | 0x340000 | coredump | crash dumps (`coredump info` on the console) |
 | + | nvs | knobs, BLE bonds, calibration |
@@ -77,7 +77,7 @@ dev/factory path.
 
 ```powershell
 pip install -e tools            # once, on the host machine
-narbis-ota firmware\build\narbis_earclip.bin
+narbis-ota firmware\build\narbis_earclip_v2.bin
 ```
 
 The pusher connects, enters OTA mode, streams the image (~240-byte
@@ -91,7 +91,7 @@ Device Information firmware-revision string after reconnect.
 
 **From the browser (no python needed):** the web test app
 (`tools/testapp/index.html`, Chrome/Edge over https or localhost) has a
-**Firmware update** panel — connect, pick `narbis_earclip.bin`, press
+**Firmware update** panel — connect, pick `narbis_earclip_v2.bin`, press
 Flash. Same protocol, same safety rails (CRC verify, auto-rollback,
 resume, reconnect + version confirmation). Works against production
 units too, not just TEST builds — pairing is triggered automatically if
@@ -107,9 +107,20 @@ Useful variants:
   and framing are all in `firmware/components/narbis_core/include/narbis/proto.h`
   (`NC_OTA_*`), reference client in `tools/narbis_client/ota.py`.
 
-Version string: the build stamps `git describe` into the image — tag
-releases (`git tag v0.3.0`) so devices report meaningful versions over
-BLE and on the console.
+**From the web OTA updater** (https://narbiscorp.github.io/edge-OTA/, the
+same page that updates the Edge glasses): it finds the earclip by name and
+lists this repo's releases that carry the matching app image —
+`narbis_earclip_v2_functest.bin` for a `… TEST` board. Legacy page-CRC DFU
+(`docs/legacy_dfu_protocol.md`), same device-side checks. To publish a
+build there: `tools\make_factory_image.ps1` (writes the app image to
+`vendor\ota\` beside the USB image), commit + push, OTA-test it, then
+`tools\publish_ota_release.ps1` (pre-release `functest-<version>`;
+`-DryRun` first).
+
+Version string: the build stamps `git describe --match "v[0-9]*"` into
+the image — tag releases (`git tag v0.3.0`) so devices report meaningful
+versions over BLE and on the console. The `functest-*` release tags are
+ignored by design.
 
 ## 4. If something goes wrong
 

@@ -114,7 +114,7 @@ pip install -e tools[dev,viz,data]
 narbis-record --out session1/          # record all streams to CSV/parquet
 narbis-plot                            # live waveform + IBI + gate spans
 narbis-knobs list|get|set|save|diff
-narbis-ota firmware/build/narbis_earclip.bin [--loop 20]
+narbis-ota firmware/build/narbis_earclip_v2.bin [--loop 20]
 narbis-selftest
 ```
 

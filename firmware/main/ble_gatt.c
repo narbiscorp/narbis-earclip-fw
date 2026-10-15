@@ -114,6 +114,7 @@ static volatile bool s_peer_was_bonded; /* host task writes; sys_task reads */
 static volatile bool s_sub_ppg, s_sub_accel, s_sub_ibi, s_sub_event;
 static volatile bool s_sub_status, s_sub_ctrl, s_sub_hrs, s_sub_batt;
 static volatile bool s_sub_ota;
+static volatile bool s_sub_dfu;        /* legacy DFU FF03 (web updater) */
 
 static volatile bool s_window_open;
 static bool s_sec_open;                /* open_pairing knob || TEST_MODE */
@@ -344,7 +345,7 @@ static void post_sub_change(void)
     m.u.subs.hrs = s_sub_hrs;
     m.u.subs.status = s_sub_status;
     m.u.subs.ctrl = s_sub_ctrl;
-    m.u.subs.ota = s_sub_ota;
+    m.u.subs.ota = s_sub_ota || s_sub_dfu;
     (void)sys_post(&m);
 }
 
@@ -689,7 +690,7 @@ static void clear_link_state(void)
 {
     s_sub_ppg = s_sub_accel = s_sub_ibi = s_sub_event = false;
     s_sub_status = s_sub_ctrl = s_sub_hrs = s_sub_batt = false;
-    s_sub_ota = false;
+    s_sub_ota = s_sub_dfu = false;
     s_encrypted = false;
     s_peer_was_bonded = false;
     s_mtu = 23;
@@ -764,6 +765,11 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         else if (ah == s_vh_hrs)       s_sub_hrs = cn;
         else if (ah == s_vh_batt)      s_sub_batt = cn;
         else if (ah == s_vh_ota_ctrl)  s_sub_ota = cn;
+        /* The web updater (legacy DFU) subscribes FF03 and nothing else
+         * of ours, then waits while its user picks a release: without
+         * this it read as an idle link and was kicked after idle_kick_s
+         * (v0.3.0-31 to -50), and standby kept counting towards OFF. */
+        else if (ah == dfu_legacy_status_handle()) s_sub_dfu = cn;
         post_sub_change();
         ble_tx_on_notify_tx();     /* fresh CCCD: kick the drain */
         return 0;
