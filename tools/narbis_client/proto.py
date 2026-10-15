@@ -28,10 +28,11 @@ from typing import List, Optional, Tuple, Union
 # ------------------------------------------------------------------ #
 
 PROTO_VER_MAJOR = 1
-PROTO_VER_MINOR = 4  # 1.1: +TEST_LED_SWEEP_CONT, STATUS btn_pressed
+PROTO_VER_MINOR = 5  # 1.1: +TEST_LED_SWEEP_CONT, STATUS btn_pressed
 #                      1.2: +EV_AGC_STATE, STATUS agc_state/agc_reacq_count
 #                      1.3: +IBI flag ARTIFACT
 #                      1.4: +PPG flag MOTION, IBI flag MOTION (light motion, not gated)
+#                      1.5: +STATUS conn_rssi_dbm (byte 30)
 PROTO_VER = (PROTO_VER_MAJOR << 8) | PROTO_VER_MINOR
 
 # ATT payload budget at MTU 247
@@ -528,7 +529,9 @@ STF_LOWBATT_WARN = 1 << 7
 
 CLOCK_DRIFT_UNKNOWN = 0x7FFF  # clock_drift_ppm_x10 sentinel
 
-_STATUS = struct.Struct("<BBHBBBBBBHIHhIHBBBB2s")
+RSSI_UNKNOWN = 127  # STATUS conn_rssi_dbm when not connected (proto 1.5)
+
+_STATUS = struct.Struct("<BBHBBBBBBHIHhIHBBBBb1s")
 assert _STATUS.size == STATUS_SIZE
 
 
@@ -553,19 +556,20 @@ class Status:
     btn_pressed: int = 0    # live GPIO2 level (proto 1.1; was reserved[0])
     agc_state: int = 0      # AGC_ST_* (proto 1.2; was reserved[1])
     agc_reacq_count: int = 0  # re-acquisitions since stream start (1.2)
-    reserved: bytes = b"\x00" * 2
+    conn_rssi_dbm: int = RSSI_UNKNOWN  # the link as the earclip hears it (1.5; was reserved[0])
+    reserved: bytes = b"\x00"
     extra: bytes = b""      # append-only tail from a newer firmware
 
 
 def build_status(s: Status) -> bytes:
-    if len(s.reserved) != 2:
-        raise ValueError("reserved must be 2 bytes")
+    if len(s.reserved) != 1:
+        raise ValueError("reserved must be 1 byte")
     return _STATUS.pack(
         s.sys_state, s.flags, s.batt_mv, s.batt_pct, s.ppg_rate_code,
         s.led_ir_ma, s.led_red_ma, s.tia_gain_code, s.tia_cf_code,
         s.gate_duty_x100, s.notif_drop_count, s.i2c_err_count,
         s.clock_drift_ppm_x10, s.uptime_s, s.ibi_last_ms, s.hr_bpm,
-        s.btn_pressed, s.agc_state, s.agc_reacq_count, s.reserved) + s.extra
+        s.btn_pressed, s.agc_state, s.agc_reacq_count, s.conn_rssi_dbm, s.reserved) + s.extra
 
 
 def parse_status(buf: bytes) -> Status:

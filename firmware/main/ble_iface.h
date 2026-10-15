@@ -41,6 +41,8 @@ void ble_tx_power_poll(void);
  * is encrypted. Both false when not connected. Any task. */
 void ble_link_security(bool *peer_bonded, bool *encrypted);
 void ble_get_conn_stats(uint16_t *mtu, uint8_t *phy, uint16_t *interval_1_25ms);
+/* RSSI of the current link as received here (dBm), NC_RSSI_UNKNOWN when not connected. */
+int8_t ble_conn_rssi(void);
 
 /* Current ATT notification payload ceiling = min(negotiated MTU - 3,
  * NC_ATT_PAYLOAD_MAX). Producers of large stream packets (PPG/ACCEL

@@ -91,7 +91,9 @@ void nc_ibi_init(nc_ibi_t *s, uint32_t ts_us_measured)
     s->k_thr_min       = nc_knob_get(KNOB_IBI_THR_MIN);
     s->k_art_en        = nc_knob_get(KNOB_IBI_ART_EN) != 0;
     s->k_art_tol_pct   = (uint8_t)nc_knob_get(KNOB_IBI_ART_TOL_PCT);
+    s->k_art_tol_motion_pct = (uint8_t)nc_knob_get(KNOB_IBI_ART_TOL_MOTION_PCT);
     s->k_refract_frac_pct = (uint8_t)nc_knob_get(KNOB_REFRACT_FRAC_PCT);
+    s->k_fiducial = (uint8_t)nc_knob_get(KNOB_IBI_FIDUCIAL);
     nc_ibi_plaus_reset(&s->plaus);
     derive(s, ts_us_measured, true);
 }
@@ -145,8 +147,22 @@ bool nc_ibi_plaus_check(nc_ibi_plaus_t *p, uint16_t ibi_ms, uint8_t tol_pct)
         plaus_accept(p, ibi_ms);
         return false;
     }
-    /* Flagged. NC_IBI_ART_ANCHOR in a row that agree with each other are
-     * a real rate change: adopt them as the reference. */
+    /* Flagged. Right after one flagged interval, one that agrees with it,
+     * both within a breathing swing of the median (0.7-1.5x), confirms a
+     * real swing: accept this one and let both into the reference. */
+    if (p->run_n == 1) {
+        const uint16_t prev = p->run[0];
+        const bool prev_swing = (uint32_t)prev * 10u >= 7u * med && (uint32_t)prev * 10u <= 15u * med;
+        const bool this_swing = (uint32_t)ibi_ms * 10u >= 7u * med && (uint32_t)ibi_ms * 10u <= 15u * med;
+        if (!off_by(ibi_ms, prev, tol_pct) && prev_swing && this_swing) {
+            p->run_n = 0;
+            plaus_accept(p, prev);
+            plaus_accept(p, ibi_ms);
+            return false;
+        }
+    }
+    /* NC_IBI_ART_ANCHOR in a row that agree with each other are a real rate
+     * change of any size: adopt them as the reference. */
     if (p->run_n < NC_IBI_ART_ANCHOR) {
         p->run[p->run_n++] = ibi_ms;
     } else {
@@ -188,6 +204,61 @@ static inline int64_t pt_decay(int64_t pt, int32_t d_q31)
     return (pt >> 31) * d_q31 + (((pt & (Q31_ONE - 1)) * d_q31) >> 31);
 }
 
+/* Onset of the captured beat: where its slope sum first rose through half
+ * its peak, linearly interpolated between the two samples around it. Found
+ * from the capture's first sample: back while still above half (the rise
+ * began before the threshold), or forward while not yet above it. False
+ * when the crossing has left the history (then the peak time stands). */
+static bool onset_time(const nc_ibi_t *s, uint64_t *t_out)
+{
+    const int64_t half = s->y0 / 2;
+    const uint32_t oldest = s->n_smp - (NC_IBI_HIST - 1u);
+    uint32_t k = s->start_n;                       /* first sample > half */
+    if (s->ssf_hist[k % NC_IBI_HIST] > half) {
+        while (k != oldest && s->ssf_hist[(k - 1u) % NC_IBI_HIST] > half) k--;
+        if (k == oldest) return false;
+    } else {
+        while (k != s->peak_n && s->ssf_hist[k % NC_IBI_HIST] <= half) k++;
+        if (k == s->start_n) return false;
+    }
+    const int64_t a = s->ssf_hist[(k - 1u) % NC_IBI_HIST];   /* <= half */
+    const int64_t b = s->ssf_hist[k % NC_IBI_HIST];          /* >  half */
+    if (b <= a || a > half) return false;
+    const int64_t frac_q15 = ((half - a) << 15) / (b - a);   /* 0..1 of a sample */
+    /* k sits (peak_n - k) samples before the max; the crossing a fraction
+     * of a sample after k - 1. */
+    const int64_t back_q15 = ((int64_t)(s->peak_n - k + 1u) << 15) - frac_q15;
+    *t_out = (uint64_t)((int64_t)s->t_peak_us - ((back_q15 * (int64_t)s->ts_us) >> 15));
+    return true;
+}
+
+/* First hump of the captured beat: the earliest local max of its slope sum
+ * that reaches 70 % of the capture's max, parabola-refined. A two-stage
+ * upstroke has two near-equal humps; this keeps the mark on the first. */
+static bool first_hump_time(const nc_ibi_t *s, uint64_t *t_out, bool *refined)
+{
+    for (uint32_t j = s->start_n; j != s->peak_n; j++) {
+        const int64_t y = s->ssf_hist[j % NC_IBI_HIST];
+        if (y * 10 < s->y0 * 7) continue;
+        const int64_t ym = s->ssf_hist[(j - 1u) % NC_IBI_HIST];
+        const int64_t yp = s->ssf_hist[(j + 1u) % NC_IBI_HIST];
+        if (!(y >= ym && y > yp)) continue;
+        int64_t delta_q15 = 0;
+        const int64_t den = ym - 2 * y + yp;
+        *refined = false;
+        if (den < 0) {
+            delta_q15 = ((ym - yp) * (1LL << 14)) / den;
+            if (delta_q15 < -16384) delta_q15 = -16384;
+            if (delta_q15 > 16384) delta_q15 = 16384;
+            *refined = true;
+        }
+        const int64_t back_q15 = ((int64_t)(s->peak_n - j) << 15) - delta_q15;
+        *t_out = (uint64_t)((int64_t)s->t_peak_us - ((back_q15 * (int64_t)s->ts_us) >> 15));
+        return true;
+    }
+    return false;   /* the max itself is the first hump: the peak time stands */
+}
+
 /* Commit the captured peak: sub-sample timing, IBI/gap classification,
  * confidence, tracker updates. Returns true if a record was emitted. */
 static bool commit(nc_ibi_t *s, int64_t thr, nc_ibi_rec_t *out)
@@ -216,6 +287,20 @@ static bool commit(nc_ibi_t *s, int64_t thr, nc_ibi_rec_t *out)
     }
     uint64_t t_beat = (uint64_t)((int64_t)s->t_peak_us +
                                  (((int64_t)delta_q15 * s->ts_us) >> 15));
+    if (s->k_fiducial == 1) {
+        uint64_t t_on;
+        if (onset_time(s, &t_on)) {
+            t_beat = t_on;
+            fl |= NC_IBIF_INTERPOLATED;
+        }
+    } else if (s->k_fiducial == 2) {
+        uint64_t t_h;
+        bool refined = false;
+        if (first_hump_time(s, &t_h, &refined)) {
+            t_beat = t_h;
+            fl = (uint8_t)(refined ? (fl | NC_IBIF_INTERPOLATED) : (fl & ~NC_IBIF_INTERPOLATED));
+        }
+    }
 
     /* Confidence terms, computed against the PRE-update context so the
      * current beat is judged by history, not by itself. */
@@ -264,7 +349,8 @@ static bool commit(nc_ibi_t *s, int64_t thr, nc_ibi_rec_t *out)
         }
         ibi_out = (uint16_t)dt_ms;
         s->prev_ibi_ms = ibi_out;
-        if (s->k_art_en && nc_ibi_plaus_check(&s->plaus, ibi_out, s->k_art_tol_pct)) {
+        const uint8_t tol = s->motion_since_beat ? s->k_art_tol_motion_pct : s->k_art_tol_pct;
+        if (s->k_art_en && nc_ibi_plaus_check(&s->plaus, ibi_out, tol)) {
             fl |= NC_IBIF_ARTIFACT;
         }
         emit = true;
@@ -345,6 +431,7 @@ bool nc_ibi_update(nc_ibi_t *s, int32_t bp, uint64_t t_us, bool gated,
     s->ring[s->ring_idx] = d;
     if (++s->ring_idx >= s->ssf_win) s->ring_idx = 0;
     const int64_t ssf = s->ssf_sum;
+    s->ssf_hist[s->n_smp % NC_IBI_HIST] = ssf;
 
     /* Threshold tracker decays every sample; floor at ibi_thr_min so a
      * silent input (dropout) cannot drag the threshold to zero. */
@@ -364,6 +451,7 @@ bool nc_ibi_update(nc_ibi_t *s, int32_t bp, uint64_t t_us, bool gated,
         s->amp_ema = 0;
         s->prev_ibi_ms = 0;
         s->ssf_prev = ssf;
+        s->n_smp++;
         return false;
     }
 
@@ -380,6 +468,7 @@ bool nc_ibi_update(nc_ibi_t *s, int32_t bp, uint64_t t_us, bool gated,
             s->ym1 = s->ssf_prev;
             s->y0 = ssf;
             s->t_peak_us = t_us;
+            s->peak_n = s->n_smp;
             s->want_next = true;
         }
         if (2 * ssf < s->y0 || ssf < thr)
@@ -391,8 +480,10 @@ bool nc_ibi_update(nc_ibi_t *s, int32_t bp, uint64_t t_us, bool gated,
         s->yp1 = ssf;              /* placeholder until want_next fires */
         s->want_next = true;
         s->t_peak_us = t_us;
+        s->start_n = s->peak_n = s->n_smp;
     }
     s->ssf_prev = ssf;
+    s->n_smp++;
     return emitted;
 }
 

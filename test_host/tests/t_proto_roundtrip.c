@@ -378,6 +378,7 @@ static void test_status(void)
         .hr_bpm = 74,
         .agc_state = 2,               /* LOCKED, proto 1.2 */
         .agc_reacq_count = 3,
+        .conn_rssi_dbm = -55,
         .reserved = { 0 },
     };
 

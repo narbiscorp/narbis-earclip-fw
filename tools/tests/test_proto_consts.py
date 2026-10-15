@@ -46,7 +46,7 @@ def test_python_mirror_agrees():
 def test_spot_checks():
     m = _model()
     flat = m["flat"]
-    assert flat["PROTO_VER"] == 0x0104  # 1.4: +PPG / IBI flag MOTION
+    assert flat["PROTO_VER"] == 0x0105  # 1.5: +STATUS conn_rssi_dbm
     assert flat["OP_TEST_SELFTEST_ONE"] == 0xE0
     assert flat["OP_TEST_REPORT"] == 0xEA
     assert flat["FACTORY_MAGIC"] == 0x4E415242

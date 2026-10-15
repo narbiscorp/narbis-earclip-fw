@@ -47,8 +47,16 @@
  *    6 /min RSA: median-only 60-78 % false flags, both-references 0 %).
  *    On the two first guided H10 recordings (2026-10-09) at 15 %: 77 % of
  *    the junk intervals flagged, 1 of 324 good rest / foot-tap beats.
+ *    A flagged interval followed by one that agrees with it (within tol), both
+ *    within 0.7-1.5x the median, is a real swing (deep slow breathing moves the
+ *    interval 20-30 % in a beat or two): the second is accepted and both join
+ *    the reference, so one beat per swing is flagged, not a run until four
+ *    agree (2026-10-15: runs of 4 real beats flagged during paced breathing).
+ *    The tolerance is ibi_art_tol_pct (20 %) still, ibi_art_tol_motion_pct
+ *    (15 %) for a beat found during light motion.
  *    Four consecutive flagged intervals that agree with each other (within
- *    tol) are a genuine rate change: they become the new reference. The
+ *    tol) are a genuine rate change of any size (a halved rhythm from double
+ *    counting is outside the 0.7-1.5x swing test): they become the new reference. The
  *    reference survives gating (heart rate does not jump during a few
  *    seconds of motion) and resets with FIRST_AFTER_GAP.
  */
@@ -60,6 +68,11 @@
 /* SSF ring capacity: ssf_win_ms max (200 ms) at 500 sps = 100 entries,
  * headroom for measured-period undershoot. */
 #define NC_IBI_SSF_MAX 128
+
+/* Slope-sum history for the onset fiducial (ibi_fiducial 1): reaches back
+ * from the slope-sum peak to its half-height rise — 512 ms at 500 sps.
+ * A power of two, so the sample counter can wrap. */
+#define NC_IBI_HIST 256
 
 #define NC_IBI_ART_REF      5    /* accepted intervals in the median       */
 #define NC_IBI_ART_ANCHOR   4    /* agreeing flagged intervals = new rate  */
@@ -95,7 +108,9 @@ typedef struct {
     bool     k_interp_en;
     bool     k_art_en;
     uint8_t  k_art_tol_pct;
+    uint8_t  k_art_tol_motion_pct; /* while the beat came through light motion */
     uint8_t  k_refract_frac_pct; /* adaptive refractory, % of the median clean IBI */
+    uint8_t  k_fiducial;       /* 0 = slope-sum peak, 1 = onset (half-height rise) */
     nc_ibi_plaus_t plaus;
 
     /* derivative + slope-sum */
@@ -116,6 +131,11 @@ typedef struct {
     int64_t  y0, ym1, yp1;     /* running max and its neighbors        */
     uint64_t t_peak_us;
     uint32_t refract_cnt;
+
+    /* onset fiducial: every SSF sample, by sample counter */
+    int64_t  ssf_hist[NC_IBI_HIST];
+    uint32_t n_smp;            /* samples seen (the index of the next)  */
+    uint32_t start_n, peak_n;  /* this capture: its first sample, its max */
 
     /* light motion since the last committed beat (nc_ibi_note_motion) */
     bool     motion_since_beat;

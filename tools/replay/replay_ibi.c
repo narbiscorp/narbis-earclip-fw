@@ -17,6 +17,7 @@
  *
  * out.csv: dev_t_beat_us,ibi_ms,confidence,flags — IBI records, as the firmware emits them.
  * --dump-acc: dev_us,acc_energy,gated,motion per PPG sample (replay mode), for picking thresholds.
+ * --dump-ssf: dev_us,bp,ssf,thr,in_peak per PPG sample: the beat detector from the inside.
  * Build and the scorer: tools/replay/README.md.
  */
 #include <stdio.h>
@@ -127,11 +128,11 @@ int main(int argc, char **argv)
 {
     if (argc < 3) {
         fprintf(stderr, "usage: replay_ibi <ppg_raw.csv> <out.csv> [--accel accel_raw.csv] "
-                        "[--gate recorded|none|replay] [--knob 0xID=value]... [--dump-acc acc.csv]\n");
+                        "[--gate recorded|none|replay] [--knob 0xID=value]... [--dump-acc acc.csv] [--dump-ssf ssf.csv]\n");
         return 2;
     }
     enum { G_RECORDED, G_NONE, G_REPLAY } gate = G_RECORDED;
-    const char *acc_path = NULL, *dump_path = NULL;
+    const char *acc_path = NULL, *dump_path = NULL, *ssf_path = NULL;
     nc_knobs_init();
     for (int i = 3; i < argc; i++) {
         if (!strcmp(argv[i], "--gate") && i + 1 < argc) {
@@ -139,6 +140,8 @@ int main(int argc, char **argv)
             gate = !strcmp(g, "none") ? G_NONE : !strcmp(g, "replay") ? G_REPLAY : G_RECORDED;
         } else if (!strcmp(argv[i], "--accel") && i + 1 < argc) {
             acc_path = argv[++i];
+        } else if (!strcmp(argv[i], "--dump-ssf") && i + 1 < argc) {
+            ssf_path = argv[++i];
         } else if (!strcmp(argv[i], "--dump-acc") && i + 1 < argc) {
             dump_path = argv[++i];
         } else if (!strcmp(argv[i], "--knob") && i + 1 < argc) {
@@ -188,6 +191,8 @@ int main(int argc, char **argv)
     FILE *out = fopen(argv[2], "w");
     if (!out) { perror(argv[2]); return 1; }
     FILE *dump = dump_path ? fopen(dump_path, "w") : NULL;
+    FILE *ssfd = ssf_path ? fopen(ssf_path, "w") : NULL;
+    if (ssfd) fprintf(ssfd, "dev_us,bp,ssf,thr,in_peak\n");
     if (dump) fprintf(dump, "dev_us,acc_energy,gated,motion\n");
     fprintf(out, "dev_t_beat_us,ibi_ms,confidence,flags\n");
     size_t beats = 0, gated_n = 0, motion_n = 0, ai = 0;
@@ -217,13 +222,21 @@ int main(int argc, char **argv)
         if (dump) fprintf(dump, "%llu,%u,%d,%d\n", s[i].dev_us, acc_e, gated, motion);
         if (motion) nc_ibi_note_motion(&ibi);
         nc_ibi_rec_t r;
-        if (nc_ibi_update(&ibi, o.bp, s[i].dev_us, gated, &r)) {
+        const bool hit = nc_ibi_update(&ibi, o.bp, s[i].dev_us, gated, &r);
+        if (ssfd) {
+            int64_t thr = (ibi.peak_track * ibi.k_thr_frac_x100 / 100) >> 8;
+            if (thr < ibi.k_thr_min) thr = ibi.k_thr_min;
+            fprintf(ssfd, "%llu,%d,%lld,%lld,%d\n", s[i].dev_us, (int)o.bp,
+                    (long long)ibi.ssf_sum, (long long)thr, ibi.in_peak ? 1 : 0);
+        }
+        if (hit) {
             fprintf(out, "%llu,%u,%u,%u\n", (unsigned long long)r.t_beat_us, r.ibi_ms, r.confidence, r.flags);
             beats++;
         }
     }
     fclose(out);
     if (dump) fclose(dump);
+    if (ssfd) fclose(ssfd);
     free(s);
     free(a);
     fprintf(stderr, "replay_ibi: %zu samples (period %u us), %zu gated, %zu in soft motion, %zu beat records\n",

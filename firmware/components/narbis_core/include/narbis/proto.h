@@ -21,13 +21,15 @@
 #include "narbis/nc_types.h"
 
 #define NC_PROTO_VER_MAJOR  1
-#define NC_PROTO_VER_MINOR  4   /* 1.1: +TEST_LED_SWEEP_CONT (additive)
+#define NC_PROTO_VER_MINOR  5   /* 1.1: +TEST_LED_SWEEP_CONT (additive)
                                    1.2: +EV_AGC_STATE, STATUS agc_state /
                                         agc_reacq_count (additive)
                                    1.3: +IBI flag ARTIFACT (additive)
                                    1.4: +PPG flag MOTION, IBI flag MOTION:
                                         light motion detected through, not
-                                        gated (additive)                 */
+                                        gated (additive)
+                                   1.5: +STATUS conn_rssi_dbm, byte 30
+                                        (additive; was reserved 0)       */
 #define NC_PROTO_VER        ((NC_PROTO_VER_MAJOR << 8) | NC_PROTO_VER_MINOR)
 
 /* ------------------------------------------------------------------ */
@@ -168,8 +170,12 @@ typedef struct NC_PACKED {
     uint8_t  btn_pressed;          /* live GPIO2 level (1 = held), proto 1.1 */
     uint8_t  agc_state;            /* nc_agc_state_t, proto 1.2 */
     uint8_t  agc_reacq_count;      /* re-acquisitions since stream start (sat 255), 1.2 */
-    uint8_t  reserved[2];
+    int8_t   conn_rssi_dbm;        /* the link as the earclip hears its central, dBm;
+                                      NC_RSSI_UNKNOWN when not connected, 1.5 */
+    uint8_t  reserved[1];
 } nc_status_t;
+
+#define NC_RSSI_UNKNOWN 127
 
 #define NC_STF_CHARGING       (1u << 0)
 #define NC_STF_CHARGE_DONE    (1u << 1)

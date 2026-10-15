@@ -1129,6 +1129,16 @@ uint16_t ble_att_payload_budget(void)
     return (budget < NC_ATT_PAYLOAD_MAX) ? budget : NC_ATT_PAYLOAD_MAX;
 }
 
+int8_t ble_conn_rssi(void)
+{
+    uint16_t c = s_conn;
+    int8_t rssi = 0;
+    if (c == BLE_HS_CONN_HANDLE_NONE || ble_gap_conn_rssi(c, &rssi) != 0 || rssi == 0) {
+        return NC_RSSI_UNKNOWN;
+    }
+    return rssi;
+}
+
 void ble_get_conn_stats(uint16_t *mtu, uint8_t *phy, uint16_t *interval_1_25ms)
 {
     uint16_t c = s_conn;

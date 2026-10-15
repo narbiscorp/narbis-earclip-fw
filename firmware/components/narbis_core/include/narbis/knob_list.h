@@ -121,10 +121,23 @@ X(IBI_THR_MIN,         0x0609, "ibi_thr_min",           NC_KNOB_I32,      1, 419
 /*   plausibility (nc_ibi.h): flag ARTIFACT when an interval is more than tol %   */ \
 /*   off BOTH the median of the last 5 accepted and the last accepted interval.    */ \
 X(IBI_ART_EN,          0x060A, "ibi_art_en",            NC_KNOB_BOOL,     0,      1,      1, "",      KPL) \
-X(IBI_ART_TOL_PCT,     0x060B, "ibi_art_tol_pct",       NC_KNOB_U8,       5,     50,     15, "%",     KPL) \
+X(IBI_ART_TOL_PCT,     0x060B, "ibi_art_tol_pct",       NC_KNOB_U8,       5,     50,     20, "%",     KPL) \
 /*   adaptive refractory (nc_ibi.c commit): after a beat, no new one for max(refract_ms, */ \
 /*   this % of the median clean interval); 0 = refract_ms only. Stops double counts.     */ \
 X(REFRACT_FRAC_PCT,    0x060C, "refract_frac_pct",      NC_KNOB_U8,       0,     80,     60, "%",     KPL) \
+/*   ...and while the beat was found during light motion (proto 1.4 MOTION), where junk beats   */ \
+/*   cluster: 20 % still / 15 % moving flagged 5 good beats (of 283) and 43 junk on 2026-10-14. */ \
+X(IBI_ART_TOL_MOTION_PCT, 0x060D, "ibi_art_tol_motion_pct", NC_KNOB_U8,  5,     50,     15, "%",     KPL) \
+/*   beat time. A two-stage upstroke (the reflected wave) gives the slope sum two near-equal     */ \
+/*   humps ~150 ms apart; the plain peak mark flipped between them (2026-10-15: IBIs             */ \
+/*   800/1150/800 on an even ~990 ms pulse, a third of beats flagged ARTIFACT).                  */ \
+/*   0 = the slope-sum peak (to v0.3.0-52);                                                      */ \
+/*   1 = the onset, where the slope sum first rises through half its peak: steadiest on          */ \
+/*       that recording (median beat-to-beat change 148 -> 22 ms) but 12 -> 58 ms p90 off        */ \
+/*       the H10 at rest on 2026-10-14;                                                          */ \
+/*   2 = the first hump reaching 70 % of the peak (default): 148 -> 32 ms there, and as          */ \
+/*       good as 0 against the H10 at rest (p90 12 / 8 ms), talking 61 -> 74 % found.            */ \
+X(IBI_FIDUCIAL,        0x060E, "ibi_fiducial",          NC_KNOB_U8,       0,      2,      2, "",      KPL) \
 /* -- artifact gate (0x07xx) -------------------------------------------------------- */ \
 X(GATE_EN,             0x0701, "gate_en",               NC_KNOB_BOOL,     0,      1,      1, "",      KPL) \
 X(GATE_ACC_WIN_MS,     0x0702, "gate_acc_win_ms",       NC_KNOB_U16,     50,   1000,    200, "ms",    KPL) \

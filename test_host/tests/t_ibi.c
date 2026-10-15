@@ -501,15 +501,41 @@ static void t_plaus_paced_breathing_clean(void)
     CHECK_EQ(flagged, 0);
 }
 
-/* A genuine rate change (stood up): four agreeing flagged intervals become
- * the new reference, later beats at the new rate pass. */
+/* A genuine rate change within a breathing swing (800 -> 600 ms, stood
+ * up): the first interval is flagged, the next one that agrees with it
+ * confirms the change, and the new rate passes from there. (Until
+ * 2026-10-15 it took four flagged in a row: paced breathing showed runs of
+ * four real beats flagged.) */
 static void t_plaus_reanchors_on_real_change(void)
 {
     nc_ibi_plaus_t p;
     nc_ibi_plaus_reset(&p);
     for (int i = 0; i < 6; i++) CHECK(!nc_ibi_plaus_check(&p, 800, 15));
-    for (int i = 0; i < 4; i++) CHECK(nc_ibi_plaus_check(&p, 600, 15));
+    CHECK(nc_ibi_plaus_check(&p, 600, 15));
     for (int i = 0; i < 20; i++) CHECK(!nc_ibi_plaus_check(&p, 600, 15));
+}
+
+/* A halved rhythm (double counting, 800 -> 400 ms) is outside a breathing
+ * swing: it still takes four agreeing flagged intervals to adopt. */
+static void t_plaus_halved_rhythm_needs_four(void)
+{
+    nc_ibi_plaus_t p;
+    nc_ibi_plaus_reset(&p);
+    for (int i = 0; i < 6; i++) CHECK(!nc_ibi_plaus_check(&p, 800, 15));
+    for (int i = 0; i < 4; i++) CHECK(nc_ibi_plaus_check(&p, 400, 15));
+    for (int i = 0; i < 20; i++) CHECK(!nc_ibi_plaus_check(&p, 400, 15));
+}
+
+/* One stray interval (a missed beat, 2x) is flagged; the normal beat after
+ * it is not, and does not confirm it (it disagrees with the stray). */
+static void t_plaus_single_stray(void)
+{
+    nc_ibi_plaus_t p;
+    nc_ibi_plaus_reset(&p);
+    for (int i = 0; i < 6; i++) CHECK(!nc_ibi_plaus_check(&p, 800, 15));
+    CHECK(nc_ibi_plaus_check(&p, 1600, 15));
+    CHECK(!nc_ibi_plaus_check(&p, 800, 15));
+    CHECK(nc_ibi_plaus_check(&p, 1600, 15));
 }
 
 /* ---------------- adaptive refractory ------------------------------ */
@@ -642,6 +668,8 @@ int main(void)
     TST_RUN(t_plaus_double_and_missed);
     TST_RUN(t_plaus_paced_breathing_clean);
     TST_RUN(t_plaus_reanchors_on_real_change);
+    TST_RUN(t_plaus_halved_rhythm_needs_four);
+    TST_RUN(t_plaus_single_stray);
     TST_RUN(t_clean_and_noisy_rates);
     TST_RUN(t_default_knobs_clean);
     TST_RUN(t_jitter_clean_100);

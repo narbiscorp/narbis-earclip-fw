@@ -242,6 +242,7 @@ static void status_sync(bool force)
     st.btn_pressed = button_is_pressed() ? 1 : 0;   /* proto 1.1 */
     st.agc_state = acq_ppg_running() ? s_agc_state : NC_AGC_ST_OFF;  /* 1.2 */
     st.agc_reacq_count = s_agc_reacq;
+    st.conn_rssi_dbm = ble_conn_rssi();                 /* 1.5 */
 
     uint8_t buf[NC_ATT_PAYLOAD_MAX];
     size_t len = nc_enc_status(buf, &st);

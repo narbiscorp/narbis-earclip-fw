@@ -92,7 +92,7 @@ def golden_status():
         led_ir_ma=12, led_red_ma=8, tia_gain_code=4, tia_cf_code=2,
         gate_duty_x100=123, notif_drop_count=42, i2c_err_count=7,
         clock_drift_ppm_x10=-153, uptime_s=3600, ibi_last_ms=812, hr_bpm=74,
-        agc_state=P.AGC_ST_LOCKED, agc_reacq_count=3)
+        agc_state=P.AGC_ST_LOCKED, agc_reacq_count=3, conn_rssi_dbm=-55)
 
 
 # --- knob discovery chunk 0: derived from knob_list.h defaults ------- #
@@ -331,7 +331,7 @@ def test_status_golden_bytes_and_roundtrip():
     assert len(wire) == P.STATUS_SIZE
     assert wire == bytes.fromhex(
         "024d930f4c010c0804027b002a00000007006"
-        "7ff100e00002c034a0002030000")  # ...hr 74, btn 0, agc LOCKED, reacq 3
+        "7ff100e00002c034a000203c900")  # ...hr 74, btn 0, agc LOCKED, reacq 3, rssi -55
     assert P.parse_status(wire) == s
 
 
@@ -404,8 +404,9 @@ def test_knob_discover_chunk_roundtrip():
     # +1 idle kick (0x000A), +2 plausibility (0x060A..0x060B),
     # +3 optimizer (0x0416..0x0418), +1 BLE TX power (0x000B),
     # +1 AGC step compensation (0x0419), +1 pairing grace (0x000C),
-    # +1 adaptive refractory (0x060C), +1 hard motion threshold (0x0708)
-    assert chunk.total == 91
+    # +1 adaptive refractory (0x060C), +1 hard motion threshold (0x0708),
+    # +1 motion ARTIFACT tolerance (0x060D), +1 beat fiducial (0x060E)
+    assert chunk.total == 93
     assert len(chunk.records) == 6
     wire = P.build_knob_discover_chunk(chunk)
     assert len(wire) == 225 <= P.ATT_PAYLOAD_MAX
@@ -487,7 +488,7 @@ def test_uuid_construction():
 
 
 def test_constants_spot_checks():
-    assert P.PROTO_VER == 0x0104
+    assert P.PROTO_VER == 0x0105
     assert P.OP_KNOB_DISCOVER == 0x14 and P.OP_TEST_REPORT == 0xEA
     assert P.FACTORY_MAGIC == 0x4E415242
     assert P.RATE_SPS[P.RATE_250] == 250 and P.rate_sps(99) == 0
