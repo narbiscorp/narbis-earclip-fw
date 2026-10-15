@@ -1285,7 +1285,7 @@ if (typeof document !== "undefined") (() => {
       async run(ctx) {
         ctx.instruct("<strong>Press the button 5 times</strong> — quick, " +
           "clean presses, <strong>under a second each</strong> (a long " +
-          "hold is the power-off gesture: 3 s in this build). Debounced " +
+          "hold is the power-off gesture: 2 s in this build). Debounced " +
           "edges stream back with µs timestamps — verifies SW3 and the " +
           "TVS/C22 net.");
         await ctx.race(ctrl("testButtonEcho", [1]));
@@ -1561,7 +1561,7 @@ if (typeof document !== "undefined") (() => {
         ctx.instruct("Insert the <strong>µA meter</strong> in series with the " +
           "battery (or use the µCurrent adapter). On <b>Run</b>, the device " +
           "acks, waits 10 s, then enters OFF — the link will drop (expected). " +
-          "Record the settled reading, then press the button and confirm it " +
+          "Record the settled reading, then hold the button ½ s and confirm it " +
           "wakes and re-advertises. Target: ≤ 80 µA.");
         await ctx.buttons([{ label: "Run — device sleeps in 10 s", value: "go", kind: "warn" }]);
         S.expectDisconnect = true;

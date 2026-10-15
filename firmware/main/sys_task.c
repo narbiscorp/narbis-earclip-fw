@@ -827,19 +827,20 @@ static void handle_agc(const sys_msg_t *m)
 /* ------------------------------------------------------------------ */
 #if NARBIS_TEST_MODE
 
-/* Vendor-bench map: the ONLY while-on gesture is hold >= 3 s ->
- * orderly OFF (5 s until 2026-10-13, shortened at the user's request).
+/* Vendor-bench map: the ONLY while-on gesture is hold >= 2 s ->
+ * orderly OFF (5 s until 2026-10-13, 3 s until 2026-10-14, shortened at
+ * the user's request).
  * No marker / double-press / reboot gestures — operators
  * cannot mis-trigger anything, and pairing is always open in TEST
  * builds anyway (ble_gatt s_sec_open). Instant press/release feedback
  * for the dashboard comes from the 0xE5 button-echo op, and STATUS
  * carries the live debounced level in btn_pressed.
  *
- * Mechanics: DOWN arms the one-shot s_btn_tmr at 3 s, UP disarms it;
+ * Mechanics: DOWN arms the one-shot s_btn_tmr at 2 s, UP disarms it;
  * if it fires, SYS_BTN_TIMEOUT lands here and we power off — guarded
  * by the live debounced level so a lost UP edge (sys_q overflow)
  * cannot fake a hold. */
-#define TEST_OFF_HOLD_US (3LL * 1000 * 1000)
+#define TEST_OFF_HOLD_US (2LL * 1000 * 1000)
 
 static void btn_run(nc_btn_ev_t ev, uint32_t t_ms)
 {
@@ -850,7 +851,7 @@ static void btn_run(nc_btn_ev_t ev, uint32_t t_ms)
         esp_timer_start_once(s_btn_tmr, TEST_OFF_HOLD_US);
         break;
     case NC_BTN_EV_UP:
-        esp_timer_stop(s_btn_tmr);   /* released before 3 s: no action */
+        esp_timer_stop(s_btn_tmr);   /* released before 2 s: no action */
         break;
     case NC_BTN_EV_TIMEOUT:
         if (button_is_pressed()) {
