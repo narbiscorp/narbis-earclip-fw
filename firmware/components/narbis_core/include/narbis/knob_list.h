@@ -119,7 +119,8 @@ X(IBI_MIN_MS,          0x0607, "ibi_min_ms",            NC_KNOB_U16,    200,   1
 X(IBI_MAX_MS,          0x0608, "ibi_max_ms",            NC_KNOB_U16,   1000,   3000,   2000, "ms",    KPL) \
 X(IBI_THR_MIN,         0x0609, "ibi_thr_min",           NC_KNOB_I32,      1, 4194304,   100, "cnt",   KPL) \
 /*   plausibility (nc_ibi.h): flag ARTIFACT when an interval is more than tol %   */ \
-/*   off BOTH the median of the last 5 accepted and the last accepted interval.    */ \
+/*   off BOTH the median of the last 5 accepted and the last accepted interval,    */ \
+/*   and outside the breathing envelope (the range of the last 16 accepted).       */ \
 X(IBI_ART_EN,          0x060A, "ibi_art_en",            NC_KNOB_BOOL,     0,      1,      1, "",      KPL) \
 X(IBI_ART_TOL_PCT,     0x060B, "ibi_art_tol_pct",       NC_KNOB_U8,       5,     50,     20, "%",     KPL) \
 /*   adaptive refractory (nc_ibi.c commit): after a beat, no new one for max(refract_ms, */ \

@@ -54,6 +54,25 @@
  *    agree (2026-10-15: runs of 4 real beats flagged during paced breathing).
  *    The tolerance is ibi_art_tol_pct (20 %) still, ibi_art_tol_motion_pct
  *    (15 %) for a beat found during light motion.
+ *    Breathing envelope (2026-10-15, v3): an interval off both references is
+ *    still accepted when it lies within the range of the last 16 accepted
+ *    intervals (about one slow breath; the single longest and shortest left
+ *    out), widened by a third of that range when still (a breath may swing a
+ *    little wider than the last one did), not widened during light motion.
+ *    Resonance breathing swings 700 -> 1150 ms within a breath and up to
+ *    +46 % / -27 % in one beat, past any fixed tolerance that still catches
+ *    junk in a steady rhythm; the envelope scales with the person's own swing.
+ *    A 10-min 6 /min session (tablet, fw -54): 66 of its 682 beats flagged,
+ *    most of them the slowest of a breath (real pulses on the PPG); 15 with
+ *    the envelope (a motion stretch, short-long zigzags, the first beat of a
+ *    breath deeper than the last). Replayed through the detector: 59 -> 16.
+ *    Guided H10 recording of 2026-10-14, replayed: the same beats, missed
+ *    3/3 and extra 6/7 flagged as before, displaced beats 19 against 21 of
+ *    53, false flags 1 of 238 as before.
+ *    Whatever the envelope: an interval over NC_IBI_ART_MISSED_PCT of the last
+ *    accepted (a missed beat, ~2x) or under NC_IBI_ART_SPLIT_PCT (a double
+ *    count splitting one interval) is flagged — the backstop for a swing so
+ *    deep its envelope reaches twice its own fastest beat.
  *    Four consecutive flagged intervals that agree with each other (within
  *    tol) are a genuine rate change of any size (a halved rhythm from double
  *    counting is outside the 0.7-1.5x swing test): they become the new reference. The
@@ -74,25 +93,41 @@
  * A power of two, so the sample counter can wrap. */
 #define NC_IBI_HIST 256
 
-#define NC_IBI_ART_REF      5    /* accepted intervals in the median       */
+#define NC_IBI_ART_REF      5    /* newest accepted intervals in the median */
+#define NC_IBI_ART_ENV      16   /* accepted intervals in the envelope     */
+#define NC_IBI_ART_ENV_MIN  6    /* ...before the envelope is used         */
+#define NC_IBI_ART_ENV_WIDEN 3   /* still: widened by 1/this of its range  */
+#define NC_IBI_ART_MISSED_PCT 170 /* > this % of the last: missed beat     */
+#define NC_IBI_ART_SPLIT_PCT   60 /* < this % of the last: double count    */
 #define NC_IBI_ART_ANCHOR   4    /* agreeing flagged intervals = new rate  */
 #define NC_IBI_ART_CONF_MAX 20   /* confidence cap on an ARTIFACT record   */
 
 /* Plausibility reference (see the contract above). Exposed for tests. */
 typedef struct {
-    uint16_t ref[NC_IBI_ART_REF];  /* last accepted intervals, ring */
+    uint16_t ref[NC_IBI_ART_ENV];  /* last accepted intervals, ring */
     uint8_t  n;                    /* valid entries                 */
     uint8_t  idx;                  /* next write                    */
     uint16_t last;                 /* last accepted interval        */
     uint16_t run[NC_IBI_ART_ANCHOR];  /* consecutive flagged intervals */
     uint8_t  run_n;
+    uint16_t core[NC_IBI_ART_REF]; /* accepted within tol, not by the envelope alone */
+    uint8_t  core_n;
+    uint8_t  core_idx;
 } nc_ibi_plaus_t;
 
 void nc_ibi_plaus_reset(nc_ibi_plaus_t *p);
 
-/* true = ARTIFACT. tol_pct 5..50. The first 3 intervals after a reset are
+/* Median of the newest NC_IBI_ART_REF accepted intervals; 0 before 3. */
+uint16_t nc_ibi_plaus_median(const nc_ibi_plaus_t *p);
+
+/* Median of the newest core intervals (the adaptive refractory's
+ * reference, nc_ibi.c); 0 before 3. */
+uint16_t nc_ibi_plaus_core_median(const nc_ibi_plaus_t *p);
+
+/* true = ARTIFACT. tol_pct 5..50; motion = the beat came through light
+ * motion (no envelope widening). The first 3 intervals after a reset are
  * accepted unchecked (warm-up). */
-bool nc_ibi_plaus_check(nc_ibi_plaus_t *p, uint16_t ibi_ms, uint8_t tol_pct);
+bool nc_ibi_plaus_check(nc_ibi_plaus_t *p, uint16_t ibi_ms, uint8_t tol_pct, bool motion);
 
 typedef struct {
     /* measured timing + derived config (nc_ibi_init / nc_ibi_set_ts) */

@@ -107,25 +107,67 @@ void nc_ibi_plaus_reset(nc_ibi_plaus_t *p)
     memset(p, 0, sizeof *p);
 }
 
-static uint16_t median_u16(const uint16_t *v, uint8_t n)
+/* Insertion sort into s (n <= NC_IBI_ART_ENV), ~1 call per beat. */
+static void sort_u16(uint16_t *s, const uint16_t *v, uint8_t n)
 {
-    uint16_t s[NC_IBI_ART_REF];
     for (uint8_t i = 0; i < n; i++) s[i] = v[i];
-    for (uint8_t i = 1; i < n; i++) {          /* insertion sort, n <= 5 */
+    for (uint8_t i = 1; i < n; i++) {
         uint16_t x = s[i];
         uint8_t j = i;
         while (j > 0 && s[j - 1] > x) { s[j] = s[j - 1]; j--; }
         s[j] = x;
     }
+}
+
+static uint16_t median_u16(const uint16_t *v, uint8_t n)
+{
+    uint16_t s[NC_IBI_ART_ENV];
+    sort_u16(s, v, n);
     return (n & 1) ? s[n / 2] : (uint16_t)(((uint32_t)s[n / 2 - 1] + s[n / 2]) / 2u);
 }
 
-static void plaus_accept(nc_ibi_plaus_t *p, uint16_t ibi_ms)
+/* core: accepted within tolerance of the rhythm, not by the envelope
+ * alone — the adaptive refractory's reference (nc_ibi_plaus_core_median). */
+static void plaus_accept(nc_ibi_plaus_t *p, uint16_t ibi_ms, bool core)
 {
     p->ref[p->idx] = ibi_ms;
-    p->idx = (uint8_t)((p->idx + 1) % NC_IBI_ART_REF);
-    if (p->n < NC_IBI_ART_REF) p->n++;
+    p->idx = (uint8_t)((p->idx + 1) % NC_IBI_ART_ENV);
+    if (p->n < NC_IBI_ART_ENV) p->n++;
     p->last = ibi_ms;
+    if (core) {
+        p->core[p->core_idx] = ibi_ms;
+        p->core_idx = (uint8_t)((p->core_idx + 1) % NC_IBI_ART_REF);
+        if (p->core_n < NC_IBI_ART_REF) p->core_n++;
+    }
+}
+
+uint16_t nc_ibi_plaus_median(const nc_ibi_plaus_t *p)
+{
+    if (p->n < 3) return 0;
+    const uint8_t m = (p->n < NC_IBI_ART_REF) ? p->n : NC_IBI_ART_REF;
+    uint16_t v[NC_IBI_ART_REF];
+    for (uint8_t k = 0; k < m; k++) {          /* the newest m, from idx back */
+        v[k] = p->ref[(p->idx + NC_IBI_ART_ENV - 1u - k) % NC_IBI_ART_ENV];
+    }
+    return median_u16(v, m);
+}
+
+uint16_t nc_ibi_plaus_core_median(const nc_ibi_plaus_t *p)
+{
+    return (p->core_n < 3) ? 0 : median_u16(p->core, p->core_n);
+}
+
+/* Inside the breathing envelope: the range of the accepted intervals
+ * without the single longest and shortest, widened by 1/NC_IBI_ART_ENV_WIDEN
+ * of it unless the beat came through motion (nc_ibi.h contract). */
+static bool in_envelope(const nc_ibi_plaus_t *p, uint16_t ibi_ms, bool motion)
+{
+    if (p->n < NC_IBI_ART_ENV_MIN) return false;
+    uint16_t s[NC_IBI_ART_ENV];
+    sort_u16(s, p->ref, p->n);
+    const int32_t lo = s[1], hi = s[p->n - 2];
+    const int32_t w = motion ? 0 : (hi - lo) / NC_IBI_ART_ENV_WIDEN;
+    return (int32_t)ibi_ms >= lo - w && (int32_t)ibi_ms <= hi + w;
 }
 
 /* |a - b| * 100 > tol * b, in integers. */
@@ -135,16 +177,25 @@ static bool off_by(uint16_t a, uint16_t b, uint8_t tol_pct)
     return d * 100u > (uint32_t)tol_pct * b;
 }
 
-bool nc_ibi_plaus_check(nc_ibi_plaus_t *p, uint16_t ibi_ms, uint8_t tol_pct)
+bool nc_ibi_plaus_check(nc_ibi_plaus_t *p, uint16_t ibi_ms, uint8_t tol_pct, bool motion)
 {
     if (p->n < 3) {                            /* warm-up: nothing to judge by */
-        plaus_accept(p, ibi_ms);
+        plaus_accept(p, ibi_ms, true);
         return false;
     }
-    const uint16_t med = median_u16(p->ref, p->n);
-    if (!(off_by(ibi_ms, med, tol_pct) && off_by(ibi_ms, p->last, tol_pct))) {
+    const uint16_t med = nc_ibi_plaus_median(p);
+    const uint32_t x100 = (uint32_t)ibi_ms * 100u;
+    bool flag, core = false;
+    if (x100 > NC_IBI_ART_MISSED_PCT * (uint32_t)p->last ||
+        x100 < NC_IBI_ART_SPLIT_PCT * (uint32_t)p->last) {
+        flag = true;                           /* a missed beat / a split one */
+    } else {
+        core = !(off_by(ibi_ms, med, tol_pct) && off_by(ibi_ms, p->last, tol_pct));
+        flag = !core && !in_envelope(p, ibi_ms, motion);
+    }
+    if (!flag) {
         p->run_n = 0;
-        plaus_accept(p, ibi_ms);
+        plaus_accept(p, ibi_ms, core);
         return false;
     }
     /* Flagged. Right after one flagged interval, one that agrees with it,
@@ -156,8 +207,8 @@ bool nc_ibi_plaus_check(nc_ibi_plaus_t *p, uint16_t ibi_ms, uint8_t tol_pct)
         const bool this_swing = (uint32_t)ibi_ms * 10u >= 7u * med && (uint32_t)ibi_ms * 10u <= 15u * med;
         if (!off_by(ibi_ms, prev, tol_pct) && prev_swing && this_swing) {
             p->run_n = 0;
-            plaus_accept(p, prev);
-            plaus_accept(p, ibi_ms);
+            plaus_accept(p, prev, true);
+            plaus_accept(p, ibi_ms, true);
             return false;
         }
     }
@@ -180,7 +231,7 @@ bool nc_ibi_plaus_check(nc_ibi_plaus_t *p, uint16_t ibi_ms, uint8_t tol_pct)
             uint16_t run[NC_IBI_ART_ANCHOR];   /* the reset clears p->run */
             memcpy(run, p->run, sizeof run);
             nc_ibi_plaus_reset(p);
-            for (uint8_t i = 0; i < NC_IBI_ART_ANCHOR; i++) plaus_accept(p, run[i]);
+            for (uint8_t i = 0; i < NC_IBI_ART_ANCHOR; i++) plaus_accept(p, run[i], true);
         }
     }
     return true;
@@ -350,7 +401,7 @@ static bool commit(nc_ibi_t *s, int64_t thr, nc_ibi_rec_t *out)
         ibi_out = (uint16_t)dt_ms;
         s->prev_ibi_ms = ibi_out;
         const uint8_t tol = s->motion_since_beat ? s->k_art_tol_motion_pct : s->k_art_tol_pct;
-        if (s->k_art_en && nc_ibi_plaus_check(&s->plaus, ibi_out, tol)) {
+        if (s->k_art_en && nc_ibi_plaus_check(&s->plaus, ibi_out, tol, s->motion_since_beat)) {
             fl |= NC_IBIF_ARTIFACT;
         }
         emit = true;
@@ -366,9 +417,13 @@ static bool commit(nc_ibi_t *s, int64_t thr, nc_ibi_rec_t *out)
      * reference: flagged beats never enter it, so a double count cannot
      * shorten its own guard). No reference yet (warm-up, after a gap):
      * refract_ms alone. Measured on 2026-10-09 against an H10: chewing and
-     * talking read a median 570 ms against the strap's 750 ms. */
-    if (s->k_refract_frac_pct && s->plaus.n >= 3) {
-        const uint32_t med_ms = median_u16(s->plaus.ref, s->plaus.n);
+     * talking read a median 570 ms against the strap's 750 ms.
+     * Only the core intervals (within tolerance of the rhythm) count, not
+     * ones the breathing envelope alone let through: on the 2026-10-14
+     * talk replay two junk shorts the envelope took shortened the guard by
+     * 14 ms and five more junk beats came through after them. */
+    const uint32_t med_ms = nc_ibi_plaus_core_median(&s->plaus);
+    if (s->k_refract_frac_pct && med_ms) {
         const uint32_t adapt_ms = (med_ms * s->k_refract_frac_pct + 50u) / 100u;
         const uint32_t adapt = smp_from_ms(adapt_ms, s->ts_us);
         if (adapt > s->refract_cnt) s->refract_cnt = adapt;

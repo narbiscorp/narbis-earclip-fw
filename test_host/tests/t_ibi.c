@@ -447,7 +447,7 @@ static int flags_for(nc_ibi_plaus_t *p, const uint16_t *ibi, int n, bool *out)
 {
     int k = 0;
     for (int i = 0; i < n; i++) {
-        out[i] = nc_ibi_plaus_check(p, ibi[i], 15);
+        out[i] = nc_ibi_plaus_check(p, ibi[i], 15, false);
         k += out[i];
     }
     return k;
@@ -458,11 +458,11 @@ static void t_plaus_steady_and_warmup(void)
     nc_ibi_plaus_t p;
     nc_ibi_plaus_reset(&p);
     /* The first three are taken unchecked, however odd. */
-    CHECK(!nc_ibi_plaus_check(&p, 800, 15));
-    CHECK(!nc_ibi_plaus_check(&p, 400, 15));
-    CHECK(!nc_ibi_plaus_check(&p, 820, 15));
+    CHECK(!nc_ibi_plaus_check(&p, 800, 15, false));
+    CHECK(!nc_ibi_plaus_check(&p, 400, 15, false));
+    CHECK(!nc_ibi_plaus_check(&p, 820, 15, false));
     for (int i = 0; i < 200; i++) {
-        CHECK(!nc_ibi_plaus_check(&p, (uint16_t)(780 + (i % 5) * 10), 15));
+        CHECK(!nc_ibi_plaus_check(&p, (uint16_t)(780 + (i % 5) * 10), 15, false));
     }
 }
 
@@ -495,7 +495,7 @@ static void t_plaus_paced_breathing_clean(void)
     int flagged = 0;
     for (int i = 0; i < 600; i++) {
         const double ibi = base * (1.0 + 0.25 * sin(2.0 * 3.14159265358979 * 0.1 * t / 1000.0));
-        flagged += nc_ibi_plaus_check(&p, (uint16_t)(ibi + 0.5), 15);
+        flagged += nc_ibi_plaus_check(&p, (uint16_t)(ibi + 0.5), 15, false);
         t += ibi;
     }
     CHECK_EQ(flagged, 0);
@@ -510,9 +510,9 @@ static void t_plaus_reanchors_on_real_change(void)
 {
     nc_ibi_plaus_t p;
     nc_ibi_plaus_reset(&p);
-    for (int i = 0; i < 6; i++) CHECK(!nc_ibi_plaus_check(&p, 800, 15));
-    CHECK(nc_ibi_plaus_check(&p, 600, 15));
-    for (int i = 0; i < 20; i++) CHECK(!nc_ibi_plaus_check(&p, 600, 15));
+    for (int i = 0; i < 6; i++) CHECK(!nc_ibi_plaus_check(&p, 800, 15, false));
+    CHECK(nc_ibi_plaus_check(&p, 600, 15, false));
+    for (int i = 0; i < 20; i++) CHECK(!nc_ibi_plaus_check(&p, 600, 15, false));
 }
 
 /* A halved rhythm (double counting, 800 -> 400 ms) is outside a breathing
@@ -521,9 +521,9 @@ static void t_plaus_halved_rhythm_needs_four(void)
 {
     nc_ibi_plaus_t p;
     nc_ibi_plaus_reset(&p);
-    for (int i = 0; i < 6; i++) CHECK(!nc_ibi_plaus_check(&p, 800, 15));
-    for (int i = 0; i < 4; i++) CHECK(nc_ibi_plaus_check(&p, 400, 15));
-    for (int i = 0; i < 20; i++) CHECK(!nc_ibi_plaus_check(&p, 400, 15));
+    for (int i = 0; i < 6; i++) CHECK(!nc_ibi_plaus_check(&p, 800, 15, false));
+    for (int i = 0; i < 4; i++) CHECK(nc_ibi_plaus_check(&p, 400, 15, false));
+    for (int i = 0; i < 20; i++) CHECK(!nc_ibi_plaus_check(&p, 400, 15, false));
 }
 
 /* One stray interval (a missed beat, 2x) is flagged; the normal beat after
@@ -532,10 +532,121 @@ static void t_plaus_single_stray(void)
 {
     nc_ibi_plaus_t p;
     nc_ibi_plaus_reset(&p);
-    for (int i = 0; i < 6; i++) CHECK(!nc_ibi_plaus_check(&p, 800, 15));
-    CHECK(nc_ibi_plaus_check(&p, 1600, 15));
-    CHECK(!nc_ibi_plaus_check(&p, 800, 15));
-    CHECK(nc_ibi_plaus_check(&p, 1600, 15));
+    for (int i = 0; i < 6; i++) CHECK(!nc_ibi_plaus_check(&p, 800, 15, false));
+    CHECK(nc_ibi_plaus_check(&p, 1600, 15, false));
+    CHECK(!nc_ibi_plaus_check(&p, 800, 15, false));
+    CHECK(nc_ibi_plaus_check(&p, 1600, 15, false));
+}
+
+/* Plausibility as nc_ibi_update runs it on the shipped knobs: 20 % still,
+ * 15 % for a beat found through light motion. ibi 0 = FIRST_AFTER_GAP. */
+static int plaus_seq(const uint16_t *ibi, int n, const uint8_t *mot, int n_mot, bool *flag)
+{
+    nc_ibi_plaus_t p;
+    nc_ibi_plaus_reset(&p);
+    int k = 0;
+    for (int i = 0; i < n; i++) {
+        bool m = false;
+        for (int j = 0; j < n_mot; j++) m = m || mot[j] == i;
+        if (ibi[i] == 0) {
+            nc_ibi_plaus_reset(&p);
+            flag[i] = false;
+            continue;
+        }
+        flag[i] = nc_ibi_plaus_check(&p, ibi[i], m ? 15 : 20, m);
+        k += flag[i];
+    }
+    return k;
+}
+
+/* Resonance breathing, 6 /min, 10 min on the tablet (fw -54, 2026-10-15):
+ * beats 40-185 of the session as the board sent them. Every one is a real
+ * pulse (checked on the PPG); the interval swings 700 -> 1150 ms within a
+ * breath, up to +46 % / -27 % in a single beat. */
+static const uint16_t rsa_tablet[] = {
+     729,  724,  723,  784,  890,  988,  981,  840, 1125,  905,  807,  751,
+     617,  868,  764, 1056, 1118, 1079, 1028, 1000,  983,  828,  779,  759,
+     727,  786, 1160, 1151, 1059, 1084, 1031,  878,  884,  777,  766,  756,
+     848, 1094, 1143, 1056,  985,  845,  886,  698,  811,  705,  703,  706,
+    1030, 1128, 1081,  988,  955,  890,  973,  798,  739,  592,  741, 1092,
+    1122, 1096, 1084, 1006, 1017,  907,  811,  931,  826,  643,  951, 1108,
+    1138, 1048, 1038,  890,  790,  779,  793,  830,  982, 1104, 1114, 1042,
+     993,  752,  851,  761,  733,  731,  748,  859, 1080, 1091, 1074, 1075,
+    1033, 1000,  852,  836,  813,  723,  728,  861,  987, 1111, 1126, 1090,
+    1009,  875,  809,  813,  764,  756,  968, 1150, 1033, 1022,  820,  955,
+     771,  684,  733,  730,  700,  952, 1048, 1121, 1104, 1059, 1033,  757,
+     887,  800,  904,  688, 1097, 1146, 1130, 1016,  982,  789,  879,  789,
+     788,  742,
+};
+static const uint8_t rsa_tablet_motion[] = { 84, 85, 87, 88, 94, 95, 98, 99, 101, 102, 103, 143, 144 };
+#define RSA_N ((int)(sizeof rsa_tablet / sizeof rsa_tablet[0]))
+
+/* The slowest beats of each breath, which v2 (until -54) flagged and the
+ * app dropped ("the IBIs dropped"): 1030 1128 1081 988 at 76-79 s, 1092
+ * 1122 1096 1084 at 86-90 s, 1097 1146 1130 at 157-160 s, and 1160, 1094.
+ * v2 flagged 22 of these 146 beats. Left flagged: 1125 (the first deep
+ * exhale, 9 beats after the reset) and 752 (a short interval the PPG shows
+ * as a beat mark on the other hump of the upstroke). */
+static void t_plaus_resonance_breathing_recording(void)
+{
+    bool f[RSA_N];
+    const int k = plaus_seq(rsa_tablet, RSA_N, rsa_tablet_motion, (int)sizeof rsa_tablet_motion, f);
+    const int swing[] = { 26, 37, 48, 49, 50, 51, 59, 60, 61, 62, 136, 137, 138 };
+    for (int i = 0; i < (int)(sizeof swing / sizeof swing[0]); i++) CHECK(!f[swing[i]]);
+    CHECK(k <= 2);
+}
+
+/* The same breathing with a missed beat at its fastest (705 + 703 = 1408)
+ * and a double count splitting its slowest interval (1128 = 564 + 564):
+ * both are flagged, the swing around them is not. */
+static void t_plaus_resonance_breathing_missed_and_double(void)
+{
+    uint16_t v[RSA_N];
+    int n = 0;
+    for (int i = 0; i < 45; i++) v[n++] = rsa_tablet[i];
+    v[n++] = 1408;                              /* 45: 705 + 703 missed  */
+    v[n++] = 706;                               /* 46                    */
+    v[n++] = 1030;                              /* 47                    */
+    v[n++] = 564;                               /* 48: 1128 split        */
+    v[n++] = 564;                               /* 49                    */
+    for (int i = 50; i < RSA_N; i++) v[n++] = rsa_tablet[i];  /* same indices from here */
+    bool f[RSA_N];
+    plaus_seq(v, n, rsa_tablet_motion, (int)sizeof rsa_tablet_motion, f);
+    CHECK(f[45]);
+    CHECK(f[48] && f[49]);
+    CHECK(!f[46] && !f[47] && !f[50] && !f[51]);
+    for (int i = 59; i <= 62; i++) CHECK(!f[i]);
+}
+
+/* Chewing, guided H10 recording of 2026-10-14 (fw -49), replayed on the
+ * -54 detector: a steady 850-950 ms rhythm with missed beats (x2), extra
+ * beats and displaced ones. A narrow envelope stays narrow: the errors are
+ * still flagged. Classes from the strap: missed 65 68 74, extra 21 44 66
+ * (21 passes, as it did under v2). */
+static const uint16_t chew_h10[] = {
+     869,  894,  920,  895,  907,  879,  853,  876,  845,  824,  833,  799,
+     842,  893,  954,  974, 1112,  731,  785,  710,  832,  726,  540,  881,
+     853,  888,  878,  850,  909,  901,  889,  883,  898,  875,  785,  975,
+     778,  957,  869,  856,  857,  860,  892,  573,  637,  584,  839,  868,
+     868,  856,  920,  928, 1260,  660,  828,  951, 1109, 1029,  974,  855,
+     898,  983,  839,  979,  638, 1249,  642,  657, 1425,  702,  900,  754,
+     772,  745, 1571,
+};
+static const uint8_t chew_h10_motion[] = {
+     0,  1,  2,  3,  4, 20, 21, 29, 30, 31, 32, 33, 34, 35, 41, 42, 43, 44, 45, 46, 47,
+    52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72,
+    73, 74,
+};
+
+static void t_plaus_chewing_recording(void)
+{
+    enum { N = sizeof chew_h10 / sizeof chew_h10[0] };
+    bool f[N];
+    const int k = plaus_seq(chew_h10, N, chew_h10_motion, (int)sizeof chew_h10_motion, f);
+    CHECK(f[65] && f[68] && f[74]);             /* missed */
+    CHECK(f[44] && f[66]);                      /* extra  */
+    CHECK(f[22] && f[43] && f[45] && f[52] && f[53]);   /* displaced, far off */
+    CHECK_EQ(k, 16);                            /* the same 16 as v2 */
 }
 
 /* ---------------- adaptive refractory ------------------------------ */
@@ -670,6 +781,9 @@ int main(void)
     TST_RUN(t_plaus_reanchors_on_real_change);
     TST_RUN(t_plaus_halved_rhythm_needs_four);
     TST_RUN(t_plaus_single_stray);
+    TST_RUN(t_plaus_resonance_breathing_recording);
+    TST_RUN(t_plaus_resonance_breathing_missed_and_double);
+    TST_RUN(t_plaus_chewing_recording);
     TST_RUN(t_clean_and_noisy_rates);
     TST_RUN(t_default_knobs_clean);
     TST_RUN(t_jitter_clean_100);
