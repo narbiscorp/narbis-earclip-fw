@@ -35,8 +35,8 @@ the LED runs at a 1% optical duty cycle). No blink = board fails, set aside.
 
 ## 2. Button check (built into normal use)
 
-- **Power ON:** hold the side button **half a second** (from off).
-- **Power OFF:** hold the side button **2 seconds** (LED stops).
+- **Power ON:** tap the side button (from off). Any press works.
+- **Power OFF:** hold the side button **0.3 seconds** (LED stops). So during the button test, tap quickly.
 - Short presses do nothing else in this firmware. The dashboard shows a
   live "button pressed" indicator — you will verify the button during the
   test sequence.
@@ -66,7 +66,7 @@ the LED runs at a 1% optical duty cycle). No blink = board fails, set aside.
 
 1. Meter in µA range in series with the battery.
 2. Dashboard → **Deep-sleep current test** → the board sleeps 10 s later.
-3. Record the settled reading (expected ≤ 80 µA). Wake = hold button ½ s.
+3. Record the settled reading (expected ≤ 80 µA). Wake = tap the button.
 
 ## 5. Do not update firmware
 
@@ -81,7 +81,7 @@ flashed with anything else, re-run step 1.
 | No serial port on USB | Data cable? Different port? Hold BOOT while plugging. |
 | Port exists, flash fails | Close other serial programs; retry at `-b 115200`. |
 | No LED blink after boot | Re-flash once; still dark → **fail unit** (log it). |
-| Not in Chrome's device list | Board on? (hold ½ s, look for blink) · within 1 m? · Chrome has Bluetooth permission? |
+| Not in Chrome's device list | Board on? (tap the button, look for blink) · within 1 m? · Chrome has Bluetooth permission? |
 | Connect drops repeatedly | Move away from other 2.4 GHz gear; retry; note it in the report. |
 | A step shows blue ⓘ INFO | Not a failure — the value is recorded for Narbis. Continue. |
 | A step fails (red FAIL) | After the sequence ends, **click that step in the checklist** to re-run just it. Persistent fail → record and set the unit aside. |

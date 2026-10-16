@@ -239,8 +239,8 @@ const NarbisDashCore = (() => {
       "has no current-sense part; use a bench meter for that." },
     "ro.btn": { sel: "#roBtn", after: true, text:
       "Live state of the side button, straight from the firmware. In this " +
-      "functional-test firmware the button ONLY powers on (hold ½ s) and " +
-      "off (hold 2 s) — shorter presses do nothing except light this lamp, " +
+      "functional-test firmware the button ONLY powers on (any tap) and " +
+      "off (hold 0.3 s) — quicker taps do nothing except light this lamp, " +
       "which is exactly how you verify the switch works." },
     "ro.gatewear": { sel: "#roGate", after: true, text:
       "GATE lights when the firmware flags the PPG as unreliable — motion, " +
@@ -326,8 +326,7 @@ const NarbisDashCore = (() => {
     "ctl.sleep": { sel: "#btnDeepSleep", after: true, text:
       "For the bench current measurement: 10 s after you confirm, the " +
       "board enters deep sleep (target ≤ 80 µA at the cell — needs a " +
-      "meter in series with the battery). Wake it by holding the button " +
-      "½ s." },
+      "meter in series with the battery). Wake it by tapping the button." },
     "ctl.knobs": { sel: "#dashKnobsBox summary", text:
       "Every tunable parameter in the firmware (62 of them), fetched " +
       "live from the device — gain loops, filters, beat detection, " +
@@ -980,7 +979,7 @@ if (typeof document !== "undefined" && document.getElementById("dashPane"))
     if (!window.confirm(
         "Deep-sleep current test: the device sleeps in 10 s for bench " +
         "current measurement; the BLE link will drop (expected). " +
-        "Wake = hold the button ½ s. Proceed?")) return;
+        "Wake = tap the button. Proceed?")) return;
     try {
       S.expectDisconnect = true;
       await A.ctrl("testSleepNow", []);

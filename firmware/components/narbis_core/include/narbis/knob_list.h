@@ -48,7 +48,7 @@ X(BLE_TX_DBM,          0x000B, "ble_tx_dbm",            NC_KNOB_I32,    -15,    
 /*   prompt. Bonded / encrypted links keep idle_kick_s.                         */ \
 X(IDLE_KICK_PAIR_S,    0x000C, "idle_kick_pair_s",      NC_KNOB_U16,     15,    600,     60, "s",     KPL) \
 /* -- button (0x01xx) --------------------------------------------------------------- */ \
-X(PRESS_LONG_MS,       0x0101, "press_long_ms",         NC_KNOB_U16,    500,   5000,   1500, "ms",    KPL) \
+X(PRESS_LONG_MS,       0x0101, "press_long_ms",         NC_KNOB_U16,    200,   5000,   1500, "ms",    KPL) \
 X(PRESS_DOUBLE_MS,     0x0102, "press_double_ms",       NC_KNOB_U16,    200,   1000,    400, "ms",    KPL) \
 X(PRESS_REBOOT_MS,     0x0103, "press_reboot_ms",       NC_KNOB_U16,   4000,  15000,   8000, "ms",    KPL) \
 /* -- BLE (0x02xx) ------------------------------------------------------------------ */ \
