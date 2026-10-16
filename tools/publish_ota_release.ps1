@@ -60,6 +60,16 @@ Write-Host "release $tag at $sha (pre-release) on $gh"
 Write-Host "  $app  ($((Get-Item $app).Length) B)"
 Write-Host "  $usb  ($((Get-Item $usb).Length) B)"
 if ($DryRun) { Write-Host '--- notes ---'; Write-Host $body; return }
-gh release create $tag $app $usb --repo $gh --target $sha --prerelease `
-    --title "Functional-test firmware $ver" --notes $body
-if ($LASTEXITCODE -ne 0) { throw 'gh release create failed' }
+# Notes go through a file: Windows PowerShell 5.1 does not escape the
+# double quotes inside a native argument, so --notes "$body" split at the
+# first quote and gh read the pieces as asset paths.
+$notesFile = [System.IO.Path]::GetTempFileName()
+try {
+    [System.IO.File]::WriteAllText($notesFile, $body, (New-Object System.Text.UTF8Encoding($false)))
+    gh release create $tag $app $usb --repo $gh --target $sha --prerelease `
+        --title "Functional-test firmware $ver" --notes-file $notesFile
+    if ($LASTEXITCODE -ne 0) { throw 'gh release create failed' }
+}
+finally {
+    Remove-Item $notesFile -ErrorAction SilentlyContinue
+}
