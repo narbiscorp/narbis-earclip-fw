@@ -11,8 +11,9 @@
  * ssf_win_ms -> adaptive threshold = thr_frac x decaying peak tracker
  * (floor ibi_thr_min) -> peak capture with parabolic sub-sample timing
  * (interp_en) -> refractory max(refract_ms, refract_frac_pct x the median
- * clean interval) -> IBI range check [ibi_min_ms, ibi_max_ms] ->
- * confidence 0..100.
+ * clean interval), and a new capture only once the SSF has fallen back to
+ * half the threshold (re-arm, nc_ibi.c) -> IBI range check [ibi_min_ms,
+ * ibi_max_ms] -> confidence 0..100.
  *
  * Knobs are read from the registry in nc_ibi_init() only (LIVE knob edits
  * take effect at the next init/reconfig). The MEASURED sample period is
@@ -112,6 +113,13 @@
 #define NC_IBI_ART_ANCHOR   4    /* agreeing flagged intervals = new rate  */
 #define NC_IBI_ART_CONF_MAX 20   /* confidence cap on an ARTIFACT record   */
 
+/* A slope peak hidden by the refractory over this many times the committed
+ * one: the capture was a precursor bump, the threshold steps toward the
+ * hidden peak (nc_ibi.c re-arm). 4 and 5 score the same on the 2026-10-14
+ * H10, 10-15 tablet and 10-16 recordings; 3.5 lets the 10-16 one lock onto
+ * precursors at 0-8 s, 6 misses the tablet's at 271.9 s. */
+#define NC_IBI_HID_X        4
+
 /* Plausibility reference (see the contract above). Exposed for tests. */
 typedef struct {
     uint16_t ref[NC_IBI_ART_ENV];  /* last accepted intervals, ring */
@@ -177,6 +185,8 @@ typedef struct {
     int64_t  y0, ym1, yp1;     /* running max and its neighbors        */
     uint64_t t_peak_us;
     uint32_t refract_cnt;
+    bool     armed;            /* SSF back to <= thr/2 since the last capture */
+    int64_t  y_hid;            /* max SSF after a commit, until re-armed */
 
     /* onset fiducial: every SSF sample, by sample counter */
     int64_t  ssf_hist[NC_IBI_HIST];

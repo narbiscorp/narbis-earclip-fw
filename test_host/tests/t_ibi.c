@@ -799,6 +799,136 @@ static void t_motion_flag_marks_the_next_beat(void)
     free(v.bp);
 }
 
+/* The slope picture of the 2026-10-16 recording (69 s, fw -54): the
+ * band-passed IR falls steeply at each pulse onset, then rises in three
+ * parts — a small precursor (~1/3 of the main slope peak), the main hump
+ * and a long tail. At ~820 ms the capture rides from the precursor into
+ * the main hump. When the interval jumps to ~1200 ms the pulse stretches,
+ * the precursor is committed alone, the refractory (60 % of the median
+ * clean interval, ~490 ms) hides the main hump and used to end on its
+ * tail, still above the threshold: a second beat ~450-530 ms after the
+ * first (12 beats where 8 pulses were, 36-44 s). The slope of one pulse
+ * [u] s after its onset, stretched by [s]; it sums to zero, so every
+ * pulse returns to the baseline. */
+static double late_hump_slope(double u, double s)
+{
+    const double pre = 900.0, main = 4000.0, tail = 4000.0;
+    const double z0 = (u - 0.055) / 0.025, z1 = (u - 0.15) / 0.018;
+    const double z2 = (u - 0.15 - 0.15 * s) / (0.045 * s);
+    const double u3 = u - 0.15 - 0.25 * s, tau = 0.18 * s;
+    const double k = 0.3989422804014327;   /* 1/sqrt(2 pi) */
+    double d = -(pre + main + tail) * k / 0.025 * exp(-0.5 * z0 * z0)
+               + pre * k / 0.018 * exp(-0.5 * z1 * z1)
+               + main * k / (0.045 * s) * exp(-0.5 * z2 * z2);
+    if (u3 >= 0) d += tail / tau * exp(-u3 / tau);
+    return d;
+}
+
+/* Pulses at the given intervals (s), each scaled by amp[k], 100 sps;
+ * truth = the onsets. A pulse's shape stretches with the interval after it. */
+static void synth_late_hump(vec_t *v, const double *ivl, const double *amp, int n)
+{
+    memset(v, 0, sizeof *v);
+    v->ts_us = 10000;
+    double t = 0.5;
+    for (int k = 0; k < n && v->nbeats < MAX_BEATS; k++) {
+        v->beats[v->nbeats++] = (int64_t)(t * 1e6);
+        t += ivl[k];
+    }
+    v->nsamp = (long)(t * 100.0) + 50;
+    v->bp = malloc((size_t)v->nsamp * sizeof *v->bp);
+    double y = 0;
+    for (long i = 0; i < v->nsamp; i++) {
+        const double ti = (double)i * 0.01;
+        double d = 0;
+        for (int k = 0; k < v->nbeats; k++) {
+            const double u = ti - (double)v->beats[k] / 1e6;
+            if (u > -0.1 && u < 2.5) d += amp[k] * late_hump_slope(u, ivl[k] / 0.82);
+        }
+        y += d * 0.01;
+        v->bp[i] = (int32_t)y;
+    }
+}
+
+/* Detections per pulse, [onset k, onset k+1), at the shipped defaults;
+ * the extra beats and the missed pulses over pulses 3..n-2. Returns the
+ * number of records (in g_dets). */
+static int per_pulse(const vec_t *v, int *cnt, int *extra, int *miss)
+{
+    nc_knobs_init();
+    const int nd = run_det_frac(v, (int32_t)nc_knob_get(KNOB_REFRACT_FRAC_PCT));
+    memset(cnt, 0, (size_t)v->nbeats * sizeof *cnt);
+    for (int i = 0; i < nd; i++) {
+        const int64_t td = (int64_t)(g_dets[i].t_us - T0_US);
+        int k = -1;
+        while (k + 1 < v->nbeats && v->beats[k + 1] <= td) k++;
+        if (k >= 0) cnt[k]++;
+    }
+    *extra = *miss = 0;
+    for (int k = 3; k < v->nbeats - 1; k++) {
+        if (cnt[k] > 1) *extra += cnt[k] - 1;
+        if (cnt[k] == 0) (*miss)++;
+    }
+    check_invariants(g_dets, nd, 300, 2000);
+    return nd;
+}
+
+/* 820 ms, then 1080-1200 ms for 8 pulses (as at 36-44 s), then back:
+ * one beat per pulse, and the slow intervals read true. Before the
+ * re-arm: 6 extra beats, all in the slow stretch. */
+static void t_rearm_late_hump_rate_jump(void)
+{
+    static const double slow[] = { 1.08, 1.20, 1.20, 1.18, 1.16, 1.08, 0.96, 0.87 };
+    double ivl[48], amp[48];
+    for (int k = 0; k < 48; k++) {
+        ivl[k] = (k >= 24 && k < 32) ? slow[k - 24] : 0.82;
+        amp[k] = 1.0;
+    }
+    vec_t v;
+    synth_late_hump(&v, ivl, amp, 48);
+    int cnt[48], extra, miss;
+    const int nd = per_pulse(&v, cnt, &extra, &miss);
+    fprintf(stderr, "  late hump, 820 -> 1200 ms: extra %d, missed %d of %d pulses\n",
+            extra, miss, v.nbeats - 4);
+    CHECK_EQ(extra, 0);
+    CHECK_EQ(miss, 0);
+    /* the slow pulses 26-29: their intervals, within 20 ms */
+    int checked = 0;
+    for (int i = 0; i < nd; i++) {
+        const int64_t td = (int64_t)(g_dets[i].t_us - T0_US);
+        for (int k = 26; k <= 29; k++) {
+            if (td < v.beats[k] || td >= v.beats[k + 1]) continue;
+            const int truth = (int)((v.beats[k] - v.beats[k - 1]) / 1000);
+            CHECK(abs((int)g_dets[i].ibi_ms - truth) <= 20);
+            checked++;
+        }
+    }
+    CHECK_EQ(checked, 4);
+    free(v.bp);
+}
+
+/* The re-arm must not cost a real early beat: a weak (half-size) pulse
+ * 530 ms after the last one (65 % of the interval, past the refractory),
+ * then the compensatory pause. Its own onset takes the slope sum to zero,
+ * so it is found — flagged by plausibility, not dropped. */
+static void t_rearm_keeps_early_weak_beat(void)
+{
+    double ivl[40], amp[40];
+    for (int k = 0; k < 40; k++) { ivl[k] = 0.82; amp[k] = 1.0; }
+    ivl[23] = 0.53;
+    ivl[24] = 1.11;
+    amp[24] = 0.5;
+    vec_t v;
+    synth_late_hump(&v, ivl, amp, 40);
+    int cnt[40], extra, miss;
+    per_pulse(&v, cnt, &extra, &miss);
+    fprintf(stderr, "  early weak beat: found %d, extra %d, missed %d\n", cnt[24], extra, miss);
+    CHECK_EQ(cnt[24], 1);
+    CHECK_EQ(extra, 0);
+    CHECK_EQ(miss, 0);
+    free(v.bp);
+}
+
 /* The adaptive guard must not cost a real beat when the rate climbs: the
  * 180 bpm ramp (case c) still meets spec at the shipped 60 %. */
 static void t_refract_adaptive_keeps_fast_ramp(void)
@@ -811,6 +941,8 @@ int main(void)
 {
     TST_RUN(t_refract_adaptive_double_hump);
     TST_RUN(t_refract_adaptive_keeps_fast_ramp);
+    TST_RUN(t_rearm_late_hump_rate_jump);
+    TST_RUN(t_rearm_keeps_early_weak_beat);
     TST_RUN(t_motion_flag_marks_the_next_beat);
     TST_RUN(t_plaus_steady_and_warmup);
     TST_RUN(t_plaus_double_and_missed);

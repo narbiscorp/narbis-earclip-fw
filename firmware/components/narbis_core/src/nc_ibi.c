@@ -337,6 +337,16 @@ static bool first_hump_time(const nc_ibi_t *s, uint64_t *t_out, bool *refined)
     return false;   /* the max itself is the first hump: the peak time stands */
 }
 
+/* Threshold tracker step toward a slope-sum peak y. The >> 2 on a
+ * possibly-negative delta relies on arithmetic right shift
+ * (gcc/clang-defined; matches the RV32 sra the target emits). */
+static void track_peak(nc_ibi_t *s, int64_t y)
+{
+    const int64_t tgt = y * 256; /* Q8 */
+    s->peak_track += (tgt - s->peak_track) >> 2;
+    if (s->peak_track < (tgt >> 1)) s->peak_track = tgt >> 1;
+}
+
 /* Commit the captured peak: sub-sample timing, IBI/gap classification,
  * confidence, tracker updates. Returns true if a record was emitted. */
 static bool commit(nc_ibi_t *s, int64_t thr, nc_ibi_rec_t *out)
@@ -456,12 +466,9 @@ static bool commit(nc_ibi_t *s, int64_t thr, nc_ibi_rec_t *out)
         if (adapt > s->refract_cnt) s->refract_cnt = adapt;
     }
 
-    /* Trackers update on every accepted beat, emitted or not. The >> 2
-     * on a possibly-negative delta relies on arithmetic right shift
-     * (gcc/clang-defined; matches the RV32 sra the target emits). */
-    int64_t tgt = y0 * 256; /* Q8 */
-    s->peak_track += (tgt - s->peak_track) >> 2;
-    if (s->peak_track < (tgt >> 1)) s->peak_track = tgt >> 1;
+    /* Trackers update on every accepted beat, emitted or not (the >> 2
+     * below: arithmetic right shift, as in track_peak). */
+    track_peak(s, y0);
     if (s->amp_ema == 0) s->amp_ema = y0;
     else s->amp_ema += (y0 - s->amp_ema) >> 2;
 
@@ -555,14 +562,43 @@ bool nc_ibi_update(nc_ibi_t *s, int32_t bp, uint64_t t_us, bool gated,
         }
         if (2 * ssf < s->y0 || ssf < thr)
             emitted = commit(s, thr, out);
-    } else if (!s->refract_cnt && ssf > thr) {
+    } else if (!s->refract_cnt && s->armed && ssf > thr) {
         s->in_peak = true;
+        s->armed = false;
         s->y0 = ssf;
         s->ym1 = s->ssf_prev;
         s->yp1 = ssf;              /* placeholder until want_next fires */
         s->want_next = true;
         s->t_peak_us = t_us;
         s->start_n = s->peak_n = s->n_smp;
+    }
+
+    /* Re-arm: a capture may start only after the slope sum has come back
+     * down to half the threshold since the last one. Between two pulses
+     * the band-passed signal runs the other way for longer than the SSF
+     * window, so the slope sum falls to zero: before 1278 of 1291
+     * captures on four recordings (the H10 chew and talk blocks
+     * included), and the 8 that started without dipping below half the
+     * threshold first were all extra beats. Such a capture is the tail
+     * of a hump the refractory hid, still above the threshold when it
+     * ended: on the 2026-10-16 recording a precursor bump was committed,
+     * the refractory hid the pulse's main hump, and its tail was counted
+     * ~550 ms later whenever the interval jumped (820 -> 1200 ms; 12
+     * beats where 8 pulses were, 36-44 s). The dip between precursor and
+     * main hump stayed at 0.77-1.03 x thr there; one down to half the
+     * threshold would re-arm in between, and the tail would count again.
+     * The hidden hump also tells the threshold where the pulses are: one
+     * over NC_IBI_HID_X times the committed peak means a precursor was
+     * caught, and without this step the tracker follows the precursors
+     * down until ever smaller bumps fire (42-47 s there; the tails used
+     * to break that by accident). */
+    if (!s->in_peak && !s->armed) {
+        if (ssf > s->y_hid) s->y_hid = ssf;
+        if (2 * ssf <= thr) {
+            s->armed = true;
+            if (s->y_hid > NC_IBI_HID_X * s->y0) track_peak(s, s->y_hid);
+            s->y_hid = 0;
+        }
     }
     s->ssf_prev = ssf;
     s->n_smp++;
@@ -595,6 +631,7 @@ void nc_ibi_scale(nc_ibi_t *s, int32_t r_q16)
     s->y0 = nc_mul_q16(s->y0, r_q16);
     s->ym1 = nc_mul_q16(s->ym1, r_q16);
     s->yp1 = nc_mul_q16(s->yp1, r_q16);
+    s->y_hid = nc_mul_q16(s->y_hid, r_q16);
     s->amp_ema = nc_mul_q16(s->amp_ema, r_q16);
 }
 
@@ -609,5 +646,6 @@ void nc_ibi_restart_amp(nc_ibi_t *s)
     s->peak_track = 0;
     s->in_peak = false;
     s->want_next = false;
+    s->y_hid = 0;              /* re-arms on the restarted (zero) slope sum */
     s->amp_ema = 0;
 }
