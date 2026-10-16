@@ -184,6 +184,7 @@ bool nc_ibi_plaus_check(nc_ibi_plaus_t *p, uint16_t ibi_ms, uint8_t tol_pct, boo
         return false;
     }
     const uint16_t med = nc_ibi_plaus_median(p);
+    const uint16_t cmed = nc_ibi_plaus_core_median(p);
     const uint32_t x100 = (uint32_t)ibi_ms * 100u;
     bool flag, core = false;
     if (x100 > NC_IBI_ART_MISSED_PCT * (uint32_t)p->last ||
@@ -193,8 +194,24 @@ bool nc_ibi_plaus_check(nc_ibi_plaus_t *p, uint16_t ibi_ms, uint8_t tol_pct, boo
         core = !(off_by(ibi_ms, med, tol_pct) && off_by(ibi_ms, p->last, tol_pct));
         flag = !core && !in_envelope(p, ibi_ms, motion);
     }
+    /* The other part of a split: a short interval right after a flagged
+     * short one, the two together one plausible interval (in the envelope).
+     * A dicrotic hump splits a pulse unevenly (542 + 589 for a ~1130 ms
+     * pulse, 2026-10-16), and a wide breathing envelope can reach the
+     * longer part. Two real fast beats that agree are confirmed below. */
+    if (!flag && p->run_n && x100 < (100u - tol_pct) * (uint32_t)med) {
+        const uint16_t prev = p->run[p->run_n - 1];
+        const uint32_t sum = (uint32_t)prev + ibi_ms;
+        if (prev < med && sum <= UINT16_MAX &&
+            (p->n >= NC_IBI_ART_ENV_MIN ? in_envelope(p, (uint16_t)sum, motion)
+                                        : !off_by((uint16_t)sum, med, tol_pct))) {
+            flag = true;
+            core = false;
+        }
+    }
     if (!flag) {
         p->run_n = 0;
+        p->run_len = 0;
         plaus_accept(p, ibi_ms, core);
         return false;
     }
@@ -207,13 +224,20 @@ bool nc_ibi_plaus_check(nc_ibi_plaus_t *p, uint16_t ibi_ms, uint8_t tol_pct, boo
         const bool this_swing = (uint32_t)ibi_ms * 10u >= 7u * med && (uint32_t)ibi_ms * 10u <= 15u * med;
         if (!off_by(ibi_ms, prev, tol_pct) && prev_swing && this_swing) {
             p->run_n = 0;
+            p->run_len = 0;
             plaus_accept(p, prev, true);
             plaus_accept(p, ibi_ms, true);
             return false;
         }
     }
     /* NC_IBI_ART_ANCHOR in a row that agree with each other are a real rate
-     * change of any size: adopt them as the reference. */
+     * change: adopt them as the reference, when within a breathing swing
+     * (0.7-1.5x) of the refractory's reference. A run beyond it is a halved
+     * rhythm (double counts) or a doubled one (missed beats): a heart does
+     * not change that much in four beats, and adopting it would set the
+     * refractory to match and keep the error going. It takes NC_IBI_ART_ENV
+     * in a row — then the reference is what was wrong. */
+    if (p->run_len < UINT8_MAX) p->run_len++;
     if (p->run_n < NC_IBI_ART_ANCHOR) {
         p->run[p->run_n++] = ibi_ms;
     } else {
@@ -227,7 +251,10 @@ bool nc_ibi_plaus_check(nc_ibi_plaus_t *p, uint16_t ibi_ms, uint8_t tol_pct, boo
             if (p->run[i] > hi) hi = p->run[i];
         }
         const uint16_t rmed = median_u16(p->run, NC_IBI_ART_ANCHOR);
-        if ((uint32_t)(hi - lo) * 100u <= (uint32_t)tol_pct * rmed) {
+        const uint32_t ref = cmed ? cmed : med;
+        const bool swing = (uint32_t)rmed * 10u >= 7u * ref && (uint32_t)rmed * 10u <= 15u * ref;
+        if ((uint32_t)(hi - lo) * 100u <= (uint32_t)tol_pct * rmed &&
+            (swing || p->run_len >= NC_IBI_ART_ENV)) {
             uint16_t run[NC_IBI_ART_ANCHOR];   /* the reset clears p->run */
             memcpy(run, p->run, sizeof run);
             nc_ibi_plaus_reset(p);

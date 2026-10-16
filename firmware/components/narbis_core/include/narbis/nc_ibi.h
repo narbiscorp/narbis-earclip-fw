@@ -74,8 +74,18 @@
  *    count splitting one interval) is flagged — the backstop for a swing so
  *    deep its envelope reaches twice its own fastest beat.
  *    Four consecutive flagged intervals that agree with each other (within
- *    tol) are a genuine rate change of any size (a halved rhythm from double
- *    counting is outside the 0.7-1.5x swing test): they become the new reference. The
+ *    tol) and lie within 0.7-1.5x of the refractory's reference are a
+ *    genuine rate change: they become the new reference. Beyond that a run
+ *    is a halved rhythm (double counts) or a doubled one (missed beats); it
+ *    takes NC_IBI_ART_ENV in a row. Until 2026-10-16 any four were adopted:
+ *    four ~540 ms halves of a ~1080 ms pulse (a dicrotic hump counted)
+ *    became the reference, the refractory shrank to match and let more
+ *    halves through, and the real beats after them were flagged (a 69-s
+ *    dashboard session on -54: 38 of 89 beats ARTIFACT; replayed, real
+ *    beats flagged 11 -> 2, extra beats 13 -> 11, the refractory's
+ *    reference never below 818 ms). A short interval right after a flagged
+ *    short one, the two summing to one plausible interval, is the other
+ *    part of the split and is flagged too. The
  *    reference survives gating (heart rate does not jump during a few
  *    seconds of motion) and resets with FIRST_AFTER_GAP.
  */
@@ -110,6 +120,7 @@ typedef struct {
     uint16_t last;                 /* last accepted interval        */
     uint16_t run[NC_IBI_ART_ANCHOR];  /* consecutive flagged intervals */
     uint8_t  run_n;
+    uint8_t  run_len;              /* consecutive flagged, saturating */
     uint16_t core[NC_IBI_ART_REF]; /* accepted within tol, not by the envelope alone */
     uint8_t  core_n;
     uint8_t  core_idx;

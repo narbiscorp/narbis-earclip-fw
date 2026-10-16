@@ -516,14 +516,30 @@ static void t_plaus_reanchors_on_real_change(void)
 }
 
 /* A halved rhythm (double counting, 800 -> 400 ms) is outside a breathing
- * swing: it still takes four agreeing flagged intervals to adopt. */
-static void t_plaus_halved_rhythm_needs_four(void)
+ * swing: four agreeing flagged intervals are not adopted (until 2026-10-16
+ * they were, and the refractory followed them down), it takes sixteen. */
+static void t_plaus_halved_rhythm_needs_sixteen(void)
 {
     nc_ibi_plaus_t p;
     nc_ibi_plaus_reset(&p);
     for (int i = 0; i < 6; i++) CHECK(!nc_ibi_plaus_check(&p, 800, 15, false));
-    for (int i = 0; i < 4; i++) CHECK(nc_ibi_plaus_check(&p, 400, 15, false));
+    for (int i = 0; i < NC_IBI_ART_ENV; i++) CHECK(nc_ibi_plaus_check(&p, 400, 15, false));
+    CHECK_EQ(nc_ibi_plaus_core_median(&p), 400);    /* adopted on the 16th */
     for (int i = 0; i < 20; i++) CHECK(!nc_ibi_plaus_check(&p, 400, 15, false));
+}
+
+/* The same for a doubled one (every other beat missed, 800 -> 1600 ms):
+ * adopting it after four would set the refractory past the real beats. */
+static void t_plaus_doubled_rhythm_needs_sixteen(void)
+{
+    nc_ibi_plaus_t p;
+    nc_ibi_plaus_reset(&p);
+    for (int i = 0; i < 6; i++) CHECK(!nc_ibi_plaus_check(&p, 800, 15, false));
+    for (int i = 0; i < NC_IBI_ART_ENV; i++) {
+        CHECK(nc_ibi_plaus_check(&p, 1600, 15, false));
+        if (i < NC_IBI_ART_ENV - 1) CHECK_EQ(nc_ibi_plaus_core_median(&p), 800);
+    }
+    for (int i = 0; i < 20; i++) CHECK(!nc_ibi_plaus_check(&p, 1600, 15, false));
 }
 
 /* One stray interval (a missed beat, 2x) is flagged; the normal beat after
@@ -637,6 +653,27 @@ static const uint8_t chew_h10_motion[] = {
     52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72,
     73, 74,
 };
+
+/* A dicrotic hump counted as a beat (dashboard session 2026-10-16, fw -54,
+ * beats 29-70 as the board sent them): a ~1080 ms pulse read as four ~540 ms
+ * halves at 41.5-43.1 s. -54 adopted them as the new rate and flagged the
+ * real beats after them (863 830 819 824) as well. */
+static const uint16_t halves_r16[] = {
+     922, 1089,  857,  948,  859,  833,  563,  551,  693,  851, 1059,  539,
+     889,  992, 1141, 1265,  857, 1025,  823,  900,  738,  818, 1081,  535,
+     670,  534,  827,  974,  532,  547,  542,  589,  863,  830,  819,  824,
+     888, 1033, 1006, 1191, 1338, 1099,
+};
+
+static void t_plaus_dicrotic_halves_recording(void)
+{
+    enum { N = sizeof halves_r16 / sizeof halves_r16[0] };
+    bool f[N];
+    plaus_seq(halves_r16, N, NULL, 0, f);
+    for (int i = 28; i <= 31; i++) CHECK(f[i]);        /* the halves      */
+    for (int i = 32; i < N; i++) CHECK(!f[i]);         /* the beats after */
+    CHECK(f[6] && f[7] && f[11] && f[23] && f[25]);    /* other halves    */
+}
 
 static void t_plaus_chewing_recording(void)
 {
@@ -779,7 +816,9 @@ int main(void)
     TST_RUN(t_plaus_double_and_missed);
     TST_RUN(t_plaus_paced_breathing_clean);
     TST_RUN(t_plaus_reanchors_on_real_change);
-    TST_RUN(t_plaus_halved_rhythm_needs_four);
+    TST_RUN(t_plaus_halved_rhythm_needs_sixteen);
+    TST_RUN(t_plaus_doubled_rhythm_needs_sixteen);
+    TST_RUN(t_plaus_dicrotic_halves_recording);
     TST_RUN(t_plaus_single_stray);
     TST_RUN(t_plaus_resonance_breathing_recording);
     TST_RUN(t_plaus_resonance_breathing_missed_and_double);
