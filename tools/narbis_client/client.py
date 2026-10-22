@@ -329,7 +329,14 @@ class NarbisClient:
         ent = self._pending.get(resp.tid)
         # Match tid first, then op: a stale response to a timed-out request
         # whose tid got reused must not resolve the wrong future.
-        if ent is not None and ent[0] == resp.op:
+        # 0xE0 is ambiguous on the wire: TEST_SELFTEST_ONE's response (TEST
+        # ops answer with the op unchanged) and ENTER_OTA's (0x60|0x80).
+        # parse_control_response reads it as the TEST op, so a request for
+        # 0x60 also accepts 0xE0 — it was dropped as unsolicited and every
+        # narbis-ota run timed out (2026-10-21).
+        if ent is not None and (ent[0] == resp.op or
+                                (resp.op >= 0xE0 and ent[0] == resp.op & ~P.OP_RESP_FLAG)):
+            resp = P.ControlResponse(ent[0], resp.tid, resp.status, resp.payload)
             del self._pending[resp.tid]
             if not ent[1].done():
                 ent[1].set_result(resp)

@@ -247,6 +247,23 @@ def test_test_block_opcode_response_matches_unmodified_op():
     assert fake.written[-1][1][0] == 0xE5
 
 
+def test_enter_ota_response_0xe0_is_not_dropped():
+    """ENTER_OTA (0x60) answers 0x60|0x80 = 0xE0, the same byte as the TEST
+    op SELFTEST_ONE's unchanged answer. The pending tid decides which it is
+    (narbis-ota timed out on every run until 2026-10-21)."""
+    fake, client = make_client()
+    fake.handlers[U.UUID_CONTROL] = lambda d: [(
+        U.UUID_CONTROL, bytes((d[0] | 0x80, d[1], P.ST_OK)))]
+
+    async def scenario():
+        await client.connect()
+        return await client.control(0x60)
+
+    resp = run(scenario())
+    assert resp.op == 0x60 and resp.status == P.ST_OK
+    assert client.unsolicited_count == 0
+
+
 def test_disconnect_fails_pending_requests():
     fake, client = make_client()
     fake.handlers[U.UUID_CONTROL] = lambda d: []
