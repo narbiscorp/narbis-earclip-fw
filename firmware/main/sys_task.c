@@ -106,13 +106,17 @@ static int64_t s_warn_since = -1, s_stop_since = -1, s_off_since = -1;
 static int64_t s_last_activity_us;
 static int64_t s_offear_since = -1;   /* off-ear auto-sleep countdown   */
 
-#if NARBIS_TEST_MODE
+#if !NARBIS_GATED_PROFILE
 /* Standby (v0.3.0-29, user spec): nobody connected. The accelerometer
  * watches for ear posture (nc_posture.h); posture starts LOCAL sensing so
  * the optical wear detector can confirm it — and the indicator then hands
  * the LEDs to the AGC, so the breathing stops and they run at the sensing
- * level. On battery, standby_off_s without a confirmed wearer -> OFF. */
+ * level. On battery, standby_off_s without a confirmed wearer -> OFF.
+ * Production since v0.4.0 (open profile) — see the auto-off block in
+ * handle_tick for the full set of countdowns. */
 static int64_t s_standby_since;       /* last instant standby was "worn" */
+static int64_t s_nophone_since;       /* last instant an app session was up */
+static int64_t s_offear_conn_since;   /* last instant a session read "worn" */
 
 static bool standby_active(void);
 #endif
@@ -134,8 +138,8 @@ static bool s_idle_pairing;           /* last tick: a new central pairing */
 #define WEAR_PROBE_ON_US   (5LL * 1000 * 1000)
 #define WEAR_PROBE_PERIOD_US (15LL * 1000 * 1000)
 static bool s_wear_probe;
-#if !NARBIS_TEST_MODE
-static int64_t s_probe_until;         /* probe window end — prod only  */
+#if NARBIS_GATED_PROFILE
+static int64_t s_probe_until;         /* probe window end — gated only */
 #endif
 static int64_t s_probe_next;
 static int64_t s_ota_enter_us;
@@ -323,7 +327,16 @@ bool sys_app_session(void)
     return s_connected && (s_app_subs || s_in.ctrl_start_mask != 0);
 }
 
-#if NARBIS_TEST_MODE
+/* Charge state for the LED indicator (sys ctx; refreshed at 1 Hz). */
+nc_charger_state_t sys_charger_state(uint8_t *batt_pct)
+{
+    if (batt_pct != NULL) {
+        *batt_pct = s_batt_pct;
+    }
+    return s_chg;
+}
+
+#if !NARBIS_GATED_PROFILE
 static bool standby_active(void)
 {
     return !sys_app_session() && !s_boot_lowbatt &&
@@ -341,8 +354,8 @@ static bool s_local_latched;
 static void demand(void)
 {
     s_in.gate_en = nc_knob_get(KNOB_GATE_EN) != 0;
-#if NARBIS_TEST_MODE
-    s_in.wear_paused = false;        /* test builds never wear-gate */
+#if !NARBIS_GATED_PROFILE
+    s_in.wear_paused = false;        /* the open profile never wear-gates */
     {
         const bool host_stop = (s_in.ctrl_stop_mask &
                                 (NC_STREAM_MASK_PPG | NC_STREAM_MASK_IBI)) != 0;
@@ -826,7 +839,9 @@ static void handle_agc(const sys_msg_t *m)
 /* ------------------------------------------------------------------ */
 /* Button gestures                                                     */
 /* ------------------------------------------------------------------ */
-#if NARBIS_TEST_MODE
+#if !NARBIS_GATED_PROFILE
+/* Open profile (functest builds, and production since v0.4.0 — user,
+ * 2026-11-17: "the current button I like"). */
 
 /* Vendor-bench map: the ONLY while-on gesture is hold >= 0.3 s ->
  * orderly OFF (5 s until 2026-10-13, 3 s until 2026-10-14, 2 s until
@@ -868,7 +883,7 @@ static void btn_run(nc_btn_ev_t ev, uint32_t t_ms)
     s_last_activity_us = esp_timer_get_time();
 }
 
-#else /* !NARBIS_TEST_MODE — production gesture FSM */
+#else /* NARBIS_GATED_PROFILE — the handoff gesture FSM */
 
 static void btn_run(nc_btn_ev_t ev, uint32_t t_ms)
 {
@@ -907,7 +922,7 @@ static void btn_run(nc_btn_ev_t ev, uint32_t t_ms)
     s_last_activity_us = esp_timer_get_time();
 }
 
-#endif /* NARBIS_TEST_MODE */
+#endif /* !NARBIS_GATED_PROFILE */
 
 /* ------------------------------------------------------------------ */
 /* test_ops.c (runs inline in sys ctx via cb_test_op) freezes AGC for  */
@@ -1001,7 +1016,7 @@ static void handle_tick(void)
     }
 
     /* Wear re-probe window bookkeeping (see the statics' comment). */
-#if !NARBIS_TEST_MODE
+#if NARBIS_GATED_PROFILE
     if (s_wear_probe && now >= s_probe_until) {
         s_wear_probe = false;
         demand();
@@ -1071,8 +1086,8 @@ static void handle_tick(void)
         }
     }
 
-#if !NARBIS_TEST_MODE
-    /* Auto-sleep policies (compiled out in design-verification builds). */
+#if NARBIS_GATED_PROFILE
+    /* Auto-sleep policies of the gated profile. */
     if (s_connected || acq_ppg_running()) {
         s_last_activity_us = now;
     }
@@ -1090,21 +1105,59 @@ static void handle_tick(void)
         }
     }
 #else
-    /* Standby auto-off (TEST builds; production keeps the policies
-     * above). Worn = local sensing up AND the optical detector agrees.
-     * USB counts down too (v0.3.0-37, user: "sitting on table, connected
-     * to usb it should sleep") — it charges just the same in OFF. Only a
-     * console command holds it off (bench work over USB); to flash a
-     * sleeping clip, press the button first (OFF drops the USB port). */
+    /* Open-profile auto-off (production since v0.4.0; user, 2026-11-17:
+     * "auto off after 5 minutes with no phone or 2 minutes off the ear").
+     * Worn = PPG running AND the optical detector agrees.
+     *  - no app session, not worn for standby_off_s (120 s)    -> OFF
+     *  - no app session for idle_timeout_s (300 s), worn or not -> OFF
+     *  - app session streaming PPG, off the ear for
+     *    offear_sleep_s (120 s)                                 -> OFF
+     * A session that is not streaming PPG (OTA page, settings) never
+     * times out: the phone is in charge.
+     * ON USB NOTHING COUNTS DOWN: the clip stays up to show the charge on
+     * the red LED (v0.3.0-37..63 counted down on USB too, "sitting on
+     * table, connected to usb it should sleep" — superseded by the charge
+     * indicator). OTA, selftest and console commands hold every
+     * countdown. */
     {
-        const uint32_t off_s = (uint32_t)nc_knob_get(KNOB_STANDBY_OFF_S);
-        const bool worn_now = acq_ppg_running() && s_worn;
         const bool console = atomic_exchange(&s_console_activity, false);
-        if (!standby_active() || off_s == 0 || worn_now || console) {
+        const bool busy = s_state == NC_STATE_OTA ||
+                          s_state == NC_STATE_SELFTEST ||
+                          dfu_legacy_active() || s_boot_lowbatt;
+        const bool hold = s_vusb || busy || console;
+        const bool session = sys_app_session();
+        const bool ppg = acq_ppg_running();
+        const bool worn_now = ppg && s_worn;
+
+        if (hold || !standby_active() || worn_now) {
             s_standby_since = now;
-        } else if (now - s_standby_since >= (int64_t)off_s * 1000000) {
-            ESP_LOGI(TAG, "standby: not worn for %u s (%s) — OFF",
-                     (unsigned)off_s, s_vusb ? "USB" : "battery");
+        }
+        if (hold || session) {
+            s_nophone_since = now;
+        }
+        if (hold || !session || !ppg || s_worn) {
+            s_offear_conn_since = now;
+        }
+
+        const int64_t standby_us =
+            (int64_t)nc_knob_get(KNOB_STANDBY_OFF_S) * 1000000;
+        const int64_t nophone_us =
+            (int64_t)nc_knob_get(KNOB_IDLE_TIMEOUT_S) * 1000000;
+        const int64_t offear_us =
+            (int64_t)nc_knob_get(KNOB_OFFEAR_SLEEP_S) * 1000000;
+        if (standby_us != 0 && now - s_standby_since >= standby_us) {
+            ESP_LOGI(TAG, "auto-off: no phone, not worn for %lld s",
+                     (long long)(standby_us / 1000000));
+            orderly_off(false);
+        }
+        if (now - s_nophone_since >= nophone_us) {
+            ESP_LOGI(TAG, "auto-off: no phone for %lld s",
+                     (long long)(nophone_us / 1000000));
+            orderly_off(false);
+        }
+        if (now - s_offear_conn_since >= offear_us) {
+            ESP_LOGI(TAG, "auto-off: off the ear for %lld s (app connected)",
+                     (long long)(offear_us / 1000000));
             orderly_off(false);
         }
     }

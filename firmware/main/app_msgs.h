@@ -59,6 +59,9 @@ bool sys_post_from_isr(const sys_msg_t *msg, BaseType_t *hpw);
  * of our characteristics (or has a stream running) — an app session, as
  * opposed to an idle OS-level link (sys_task.c s_app_subs). */
 bool sys_app_session(void);
-/* A console command ran (console.c): holds off the TEST build's standby
+/* sys_task context only: charger state + battery % as of the last 1 Hz
+ * housekeeping tick (the LED charge indicator reads it). */
+nc_charger_state_t sys_charger_state(uint8_t *batt_pct);
+/* A console command ran (console.c): holds off the standby / no-phone
  * auto-off. Any task. */
 void sys_standby_note_activity(void);

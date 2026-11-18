@@ -35,6 +35,13 @@ esp_err_t afe4404_read_frame(nc_ppg_sample_t *out, uint64_t t_us_isr,
  * conversion round(mA*63/50), then writes LEDCNTRL (0x22). */
 esp_err_t afe4404_set_led_ma(uint8_t ir_ma, uint8_t red_ma);
 
+/* LED indicator only (nothing may be consuming samples): shorten the RED
+ * LED drive window to q16/65535 of the timing table's width, a smooth
+ * brightness control at a fixed current (the current DAC has ~0.8 mA
+ * steps, too coarse for a fade at a few mA). 65535 = the table width.
+ * afe4404_init / afe4404_apply_rate restore the table. */
+esp_err_t afe4404_set_red_drive_q16(uint16_t q16);
+
 /* rf_code/cf_code 0..7 per SBAS689D tables; writes TIA_GAIN (0x21).
  * ENSEPGAIN stays 0 (single gain shared by both phases). */
 esp_err_t afe4404_set_tia(uint8_t rf_code, uint8_t cf_code);

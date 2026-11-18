@@ -1,5 +1,6 @@
 firmware/build/
 firmware/build_factory/
+firmware/build_prod/
 vendor/ota/
 firmware/sdkconfig
 firmware/sdkconfig.old

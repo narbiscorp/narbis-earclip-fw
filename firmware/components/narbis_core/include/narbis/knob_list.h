@@ -24,6 +24,10 @@
 #define KNOB_LIST(X) \
 /*   SYM                 id      name                     type          min    max      def   unit    flags */ \
 /* -- power / battery (0x00xx) ------------------------------------------------------ */ \
+/*   idle_timeout_s, open profile (v0.4.0+): on battery with no app session     */ \
+/*   this long -> OFF, worn or not. Gated profile: no central, no stream.        */ \
+/*   offear_sleep_s, open profile: an app session streaming PPG reads off-ear    */ \
+/*   this long -> OFF. Gated profile: off-ear this long -> OFF.                  */ \
 X(IDLE_TIMEOUT_S,      0x0001, "idle_timeout_s",        NC_KNOB_U16,     10,   3600,    300, "s",     KPL) \
 X(OFFEAR_SLEEP_S,      0x0002, "offear_sleep_s",        NC_KNOB_U16,     10,   3600,    120, "s",     KPL) \
 X(MOTION_WAKE_EN,      0x0003, "motion_wake_en",        NC_KNOB_BOOL,     0,      1,      1, "",      KPL) \
@@ -47,6 +51,13 @@ X(BLE_TX_DBM,          0x000B, "ble_tx_dbm",            NC_KNOB_I32,    -15,    
 /*   long before the idle kick: the user may be reading the phone's pairing     */ \
 /*   prompt. Bonded / encrypted links keep idle_kick_s.                         */ \
 X(IDLE_KICK_PAIR_S,    0x000C, "idle_kick_pair_s",      NC_KNOB_U16,     15,    600,     60, "s",     KPL) \
+/*   charge indicator (v0.4.0, red LED only, on USB): a smooth fade whose       */ \
+/*   period runs from ind_chg_slow_ms at 0 % to ind_chg_fast_ms at 100 %, then  */ \
+/*   solid when the charger reports done. ind_chg_ma = red drive current; the   */ \
+/*   fade itself is pulse width at that current.                                 */ \
+X(IND_CHG_MA,          0x000D, "ind_chg_ma",            NC_KNOB_U8,       1,     20,      5, "mA",    KPL) \
+X(IND_CHG_SLOW_MS,     0x000E, "ind_chg_slow_ms",       NC_KNOB_U16,    600,  10000,   4000, "ms",    KPL) \
+X(IND_CHG_FAST_MS,     0x000F, "ind_chg_fast_ms",       NC_KNOB_U16,    300,   5000,   1000, "ms",    KPL) \
 /* -- button (0x01xx) --------------------------------------------------------------- */ \
 X(PRESS_LONG_MS,       0x0101, "press_long_ms",         NC_KNOB_U16,    200,   5000,   1500, "ms",    KPL) \
 X(PRESS_DOUBLE_MS,     0x0102, "press_double_ms",       NC_KNOB_U16,    200,   1000,    400, "ms",    KPL) \

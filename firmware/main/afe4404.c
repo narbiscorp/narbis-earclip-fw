@@ -37,6 +37,10 @@ static uint8_t s_ir_ma, s_red_ma;
 static uint8_t s_rf = AFE_RF_100K, s_cf = AFE_CF_5PF;
 static int8_t  s_offdac[4];          /* [0] LED1, [1] LED2, [2] AMB1, [3] AMB2 */
 static bool    s_up;                 /* true between init success and PWDN */
+/* Red LED drive window as the table programs it for the live rate, and
+ * the end count actually written (afe4404_set_red_drive_q16 shortens it
+ * for the LED indicator; every apply_rate restores the table). */
+static uint32_t s_red_led_st, s_red_led_end_tbl, s_red_led_end_cur;
 
 static void lock(void)   { xSemaphoreTake(s_mtx, portMAX_DELAY); }
 static void unlock(void) { xSemaphoreGive(s_mtx); }
@@ -199,6 +203,12 @@ esp_err_t afe4404_apply_rate(nc_rate_t rate)
     }
     for (uint8_t i = 0; err == ESP_OK && i < cfg->n_regs; i++) {
         err = wr(cfg->regs[i].reg, cfg->regs[i].val);
+        if (cfg->regs[i].reg == 0x09) {          /* LED2LEDSTC  (red) */
+            s_red_led_st = cfg->regs[i].val;
+        } else if (cfg->regs[i].reg == 0x0A) {   /* LED2LEDENDC (red) */
+            s_red_led_end_tbl = cfg->regs[i].val;
+            s_red_led_end_cur = cfg->regs[i].val;
+        }
     }
     if (err == ESP_OK) {
         err = wr(AFE_REG_CONTROL0, 0);                /* release counter reset */
@@ -270,6 +280,31 @@ esp_err_t afe4404_set_led_ma(uint8_t ir_ma, uint8_t red_ma)
     if (err == ESP_OK) {
         s_ir_ma = ir_ma;
         s_red_ma = red_ma;
+    }
+    unlock();
+    return err;
+}
+
+esp_err_t afe4404_set_red_drive_q16(uint16_t q16)
+{
+    if (s_dev == NULL || !s_up) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    lock();
+    const uint32_t w = s_red_led_end_tbl - s_red_led_st + 1;   /* ticks */
+    const uint32_t ticks = (w * (uint32_t)q16 + 32767u) / 65535u;
+    /* 0 ticks is not expressible (END == ST is a 1-tick pulse, ~0.2 % of
+     * the table width at 100 sps): close enough to dark for an LED. */
+    const uint32_t end = s_red_led_st + (ticks > 0 ? ticks - 1 : 0);
+    esp_err_t err = ESP_OK;
+    if (end != s_red_led_end_cur) {
+        /* Written with the timing engine running: the new end count takes
+         * effect at once, so at most one frame has an odd red window —
+         * harmless, this is only used while nothing consumes samples. */
+        err = wr(0x0A, end);
+        if (err == ESP_OK) {
+            s_red_led_end_cur = end;
+        }
     }
     unlock();
     return err;

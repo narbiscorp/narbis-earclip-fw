@@ -405,8 +405,9 @@ def test_knob_discover_chunk_roundtrip():
     # +3 optimizer (0x0416..0x0418), +1 BLE TX power (0x000B),
     # +1 AGC step compensation (0x0419), +1 pairing grace (0x000C),
     # +1 adaptive refractory (0x060C), +1 hard motion threshold (0x0708),
-    # +1 motion ARTIFACT tolerance (0x060D), +1 beat fiducial (0x060E)
-    assert chunk.total == 93
+    # +1 motion ARTIFACT tolerance (0x060D), +1 beat fiducial (0x060E),
+    # +3 charge indicator (0x000D..0x000F)
+    assert chunk.total == 96
     assert len(chunk.records) == 6
     wire = P.build_knob_discover_chunk(chunk)
     assert len(wire) == 225 <= P.ATT_PAYLOAD_MAX

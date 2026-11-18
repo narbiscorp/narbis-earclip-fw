@@ -17,9 +17,13 @@
  *
  * Security model (handoff §5.4 + Devon decision 3):
  *  - LE Secure Connections, Just Works (no I/O), bonding on.
+ *  - OPEN by default (NARBIS_GATED_PROFILE=0, the shipped profile since
+ *    v0.4.0): any central bonds or connects and nothing is
+ *    encrypted-only, like a Polar strap. The rest of this list is the
+ *    gated profile:
  *  - New bonds are accepted only while the pairing window is open
  *    (button double-press -> ble_open_pairing_window), or when the
- *    open_pairing knob / NARBIS_TEST_MODE build forces open pairing.
+ *    open_pairing knob forces open pairing.
  *    NimBLE has no pre-SMP veto hook, so the policy is enforced at
  *    BLE_GAP_EVENT_ENC_CHANGE: a link that encrypts via a NEW pairing
  *    outside the window gets its just-stored keys deleted and the
@@ -36,7 +40,7 @@
  *
  * Advertising: legacy PDUs. ADV payload = flags + the 128-bit Narbis
  * sensor-service UUID (21 bytes); the 19..24-char name lives in the
- * scan response (§5.4 adv-payload note). 100 ms interval for 30 s
+ * scan response (§5.4 adv-payload note). 100 ms interval for 2 min
  * after boot/disconnect/pairing-window, then 1000-1500 ms, always
  * connectable.
  *
@@ -90,7 +94,10 @@ static const char *TAG = "ble";
 #define ADV_FAST_ITVL        BLE_GAP_ADV_ITVL_MS(100)   /* 160 x 0.625 ms */
 #define ADV_SLOW_ITVL_MIN    BLE_GAP_ADV_ITVL_MS(1000)
 #define ADV_SLOW_ITVL_MAX    BLE_GAP_ADV_ITVL_MS(1500)
-#define ADV_FAST_WINDOW_US   (30LL * 1000 * 1000)
+/* Fast advertising for 2 min after boot / disconnect, then slow (user,
+ * 2026-11-17; it was 30 s): a phone finds the clip at once for the whole
+ * time someone is likely to be setting it up. */
+#define ADV_FAST_WINDOW_US   (120LL * 1000 * 1000)
 
 #define CONN_ITVL_FAST_MIN   6      /* 7.5 ms  (1.25 ms units) */
 #define CONN_ITVL_FAST_MAX   12     /* 15 ms   */
@@ -919,7 +926,7 @@ static void on_sync(void)
     }
     s_synced = true;
     tx_power_apply(true);          /* before the first advertisement */
-    adv_start(true);               /* fast for 30 s after boot */
+    adv_start(true);               /* fast for 2 min after boot */
 }
 
 static void host_task_fn(void *param)
@@ -942,12 +949,13 @@ esp_err_t ble_iface_init(void)
 
     /* Reboot-class knobs are latched once here (NVS overlay was loaded
      * by main before we run). */
-    s_sec_open = (NARBIS_TEST_MODE != 0) ||
+    s_sec_open = (NARBIS_GATED_PROFILE == 0) || (NARBIS_TEST_MODE != 0) ||
                  (nc_knob_get(KNOB_OPEN_PAIRING) != 0);
     s_hrs_en = nc_knob_get(KNOB_HRS_EN) != 0;
 
-    snprintf(s_name, sizeof(s_name), "Narbis Edge Earclip%s",
-             (NARBIS_TEST_MODE != 0) ? " TEST" : "");
+    snprintf(s_name, sizeof(s_name), "%s",
+             (NARBIS_TEST_MODE != 0) ? "Narbis Edge Earclip TEST"
+                                     : NARBIS_PRODUCT_NAME);
     const esp_app_desc_t *app = esp_app_get_description();
     size_t vlen = strnlen(app->version, sizeof(app->version));
     if (vlen >= sizeof(s_fw_ver)) {

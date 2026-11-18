@@ -85,6 +85,8 @@ static const char *boot_cause_str(pwr_boot_cause_t c)
     case PWR_BOOT_BUTTON: return "button";
     case PWR_BOOT_GHOST:  return "ghost";
     case PWR_BOOT_TIMER:  return "timer";
+    case PWR_BOOT_USB:    return "usb";
+    case PWR_BOOT_STUBTEST: return "stubtest";
     default:              return "other";
     }
 }
@@ -106,14 +108,15 @@ void app_main(void)
 
     nc_knobs_init();          /* defaults ... */
     knobs_nvs_load();         /* ... overlaid with persisted deltas */
-#if NARBIS_TEST_MODE
+#if !NARBIS_GATED_PROFILE
     /* Bench guard (first hardware, 2026-07-31): the production 1.5 s
      * hold-to-off kills the board mid-test — an operator's deliberate
      * "distinct press" during the button-echo step easily exceeds it.
      * Force 0.3 s every boot of a TEST build (runtime value only; not
      * persisted, knob editable) to match TEST_OFF_HOLD_MS in sys_task.c.
      * It was 5 s until 2026-10-13, 3 s until 2026-10-14 and 2 s until
-     * 2026-10-15, shortened at the user's request. */
+     * 2026-10-15, shortened at the user's request. Production keeps it
+     * since v0.4.0 (user, 2026-11-17: "the current button I like"). */
     nc_knob_val[KNOB_PRESS_LONG_MS] = 300;
 #endif
     diag_init();
@@ -125,8 +128,8 @@ void app_main(void)
 
     switch (cause) {
     case PWR_BOOT_GHOST:
-#if NARBIS_TEST_MODE
-        /* TEST builds power on with any press, a 0.1 s tap included
+#if !NARBIS_GATED_PROFILE
+        /* TEST and production (open profile) builds power on with any press, a 0.1 s tap included
          * (2026-10-15, at the user's request). The ~200 ms boot outlasts
          * such a tap, so it cannot be told from TVS/cap ringing here:
          * every button wake is trusted. A real ghost costs at most the
@@ -162,7 +165,7 @@ void app_main(void)
         break;   /* BUTTON / COLD / OTHER — full boot */
     }
 
-    /* TEST builds: power-on is any press, a 0.1 s tap included (until
+    /* Open profile: power-on is any press, a 0.1 s tap included (until
      * 2026-10-15 a 0.5 s hold, watched here after boot; 1 s before
      * 2026-10-14). See PWR_BOOT_GHOST above. */
 
@@ -211,8 +214,9 @@ void app_main(void)
 
     const esp_app_desc_t *app = esp_app_get_description();
     ESP_LOGI(TAG,
-             "Narbis Edge Earclip fw %s | hw V2.1 | reset: %s | boot: %s | "
-             "test_mode=%d",
+             "%s fw %s | hw V2.1 | reset: %s | boot: %s | "
+             "test_mode=%d gated=%d",
+             NARBIS_TEST_MODE ? "Narbis Edge Earclip TEST" : NARBIS_PRODUCT_NAME,
              app->version, diag_reset_reason_str(), boot_cause_str(cause),
-             NARBIS_TEST_MODE);
+             NARBIS_TEST_MODE, NARBIS_GATED_PROFILE);
 }

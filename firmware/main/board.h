@@ -10,11 +10,32 @@
 /* ------------------------------------------------------------------ */
 /* Build-mode switch                                                   */
 /* ------------------------------------------------------------------ */
-/* 1 = PCB design-verification build: advertises "... TEST", forces
- *     open pairing, disables auto-sleep/wear gating, unlocks the TEST
- *     opcode block (0xE0-0xEF) on CONTROL. 0 = production: all of that
- *     compiles out. */
+/* 1 = PCB design-verification (vendor functest) build: advertises
+ *     "Narbis Edge Earclip TEST", unlocks the TEST opcode block
+ *     (0xE0-0xEF) on CONTROL, never drops to slow advertising, and the
+ *     XIAO module LED (GPIO15) shows power/link state.
+ * 0 = production: advertises NARBIS_PRODUCT_NAME, TEST ops answer
+ *     UNAUTHORIZED, module LED dark. Everything else (NARBIS_GATED_PROFILE
+ *     below) is the same code in both. */
 #define NARBIS_TEST_MODE 0
+
+/* Production advertising name (v0.4.0, user 2026-11-17). The TEST build
+ * keeps "Narbis Edge Earclip TEST": the vendor tester and the web OTA
+ * updater route TEST boards by that name. */
+#define NARBIS_PRODUCT_NAME "Narbis Edge Clip"
+
+/* 1 = the ORIGINAL handoff production policy, never run on hardware:
+ *     bonds only inside a button double-press pairing window, encrypted
+ *     custom + OTA characteristics, marker / pairing / 1.5 s off / 8 s
+ *     reboot gestures, auto light sleep, wear-gated streaming, idle and
+ *     off-ear auto-off, no LED indicator.
+ * 0 = the open profile proven on the functest builds through v0.3.0-63
+ *     and shipped as production from v0.4.0 (user, 2026-11-17: "keep
+ *     with what we have now and move that to production"): open
+ *     pairing like a Polar strap, no encryption, any tap on / 0.3 s
+ *     hold off, ear-posture standby, red-LED breathing and charge
+ *     indicator, no light sleep, wake on USB plug-in. */
+#define NARBIS_GATED_PROFILE 0
 
 /* 1 = BENCH build for BARE XIAO modules (pre-soldering): sensor init
  *     failures are tolerated (logged, marked absent — selftest fails

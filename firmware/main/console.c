@@ -53,6 +53,7 @@
 #include "diag.h"
 #include "selftest.h"
 #include "ota.h"
+#include "power.h"
 
 static const char *TAG = "console";
 
@@ -95,6 +96,9 @@ static int cmd_ver(int argc, char **argv)
     printf("proto:     %u.%u\n", NC_PROTO_VER_MAJOR, NC_PROTO_VER_MINOR);
     printf("hw:        V2.1\n");
     printf("test_mode: %d\n", NARBIS_TEST_MODE);
+    printf("gated:     %d\n", NARBIS_GATED_PROFILE);
+    printf("name:      %s\n", NARBIS_TEST_MODE ? "Narbis Edge Earclip TEST"
+                                               : NARBIS_PRODUCT_NAME);
     return 0;
 }
 
@@ -522,6 +526,19 @@ static int cmd_off(int argc, char **argv)
     return post_ctrl(req, 2) ? 0 : 1;
 }
 
+/* Bench check of the wake stub's sleep loop without pulling a cable:
+ * OFF, the stub re-sleeps 5 polls (~15 s) without booting, then boots
+ * with "boot: stubtest". A crash in the stub would cold-boot instead
+ * ("boot: cold"), and a stub that never boots would leave the board off. */
+static int cmd_stubtest(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    printf("stubtest: OFF now, expect a boot ~15 s later with boot: stubtest\n");
+    power_stub_selftest_arm(5);
+    uint8_t req[2] = { NC_OP_POWER_OFF, next_tid() };
+    return post_ctrl(req, 2) ? 0 : 1;
+}
+
 static struct {
     struct arg_str *confirm;
     struct arg_end *end;
@@ -654,6 +671,8 @@ static void register_all(void)
           .func = cmd_reboot },
         { .command = "off", .help = "power off (deep sleep) via sys_task",
           .func = cmd_off },
+        { .command = "stubtest", .help = "off, wake stub re-sleeps 5x, boots",
+          .func = cmd_stubtest },
         { .command = "factory-reset", .help = "factory-reset CONFIRM",
           .func = cmd_factory_reset, .argtable = &freset_args },
         { .command = "coredump", .help = "coredump info|erase",
