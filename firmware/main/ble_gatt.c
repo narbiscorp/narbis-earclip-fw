@@ -854,8 +854,11 @@ static void on_reset(int reason)
 /* Transmit power (ble_tx_dbm knob)                                    */
 /* ------------------------------------------------------------------ */
 /* The C6 controller takes 3 dB steps from -15 to +18 dBm plus +20 (the
- * top); a value in between rounds down. Default +20 for range (user,
- * 2026-10-09) — it ran at the IDF default +9 before v0.3.0-35. */
+ * top); a value in between rounds down. Default +9 (v0.4.0, user
+ * 2026-11-18). It was +20 from v0.3.0-35, set for range in the same
+ * release that started driving the RF switch; the switch alone gave
+ * ~16 dB, so +9 keeps a better link than before -35 at 190 mA instead
+ * of 315 mA while transmitting. */
 static int32_t s_tx_dbm_applied = INT32_MIN;
 
 static esp_power_level_t tx_level(int32_t dbm)

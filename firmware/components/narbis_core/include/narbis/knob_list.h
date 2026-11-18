@@ -44,9 +44,11 @@ X(IND_BREATH_MS,       0x0009, "ind_breath_ms",         NC_KNOB_U16,    600,   5
 /*   PC background reconnects to a bonded clip); OTA exempt; 0 = never.           */ \
 X(IDLE_KICK_S,         0x000A, "idle_kick_s",           NC_KNOB_U16,      0,    600,     15, "s",     KPL) \
 /*   BLE transmit power, advertising + connections (C6: -15..+20 dBm in 3 dB    */ \
-/*   steps, +20 the top; values between round down). +20 for range (user,       */ \
-/*   2026-10-09; it was the IDF default +9); lower to save battery.              */ \
-X(BLE_TX_DBM,          0x000B, "ble_tx_dbm",            NC_KNOB_I32,    -15,     20,     20, "dBm",   KPL) \
+/*   steps, +20 the top; values between round down). +9 (user, 2026-11-18):     */ \
+/*   +20 (2026-10-09) bought range before the RF switch was driven; with the    */ \
+/*   switch on, +9 still beats the old +9 by ~16 dB, and TX draws 190 mA        */ \
+/*   instead of 315 mA (C6 datasheet v1.6 table 5-8).                           */ \
+X(BLE_TX_DBM,          0x000B, "ble_tx_dbm",            NC_KNOB_I32,    -15,     20,      9, "dBm",   KPL) \
 /*   a NEW central still pairing (no bond yet, link not encrypted) gets this    */ \
 /*   long before the idle kick: the user may be reading the phone's pairing     */ \
 /*   prompt. Bonded / encrypted links keep idle_kick_s.                         */ \

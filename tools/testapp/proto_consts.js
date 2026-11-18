@@ -264,7 +264,7 @@ const PROTO = {
     { sym: "STANDBY_OFF_S", id: 0x0008, name: "standby_off_s", type: 2, min: 0, max: 3600, def: 120, unit: "s", flags: 3 },
     { sym: "IND_BREATH_MS", id: 0x0009, name: "ind_breath_ms", type: 2, min: 600, max: 5000, def: 1500, unit: "ms", flags: 3 },
     { sym: "IDLE_KICK_S", id: 0x000A, name: "idle_kick_s", type: 2, min: 0, max: 600, def: 15, unit: "s", flags: 3 },
-    { sym: "BLE_TX_DBM", id: 0x000B, name: "ble_tx_dbm", type: 3, min: -15, max: 20, def: 20, unit: "dBm", flags: 3 },
+    { sym: "BLE_TX_DBM", id: 0x000B, name: "ble_tx_dbm", type: 3, min: -15, max: 20, def: 9, unit: "dBm", flags: 3 },
     { sym: "IDLE_KICK_PAIR_S", id: 0x000C, name: "idle_kick_pair_s", type: 2, min: 15, max: 600, def: 60, unit: "s", flags: 3 },
     { sym: "IND_CHG_MA", id: 0x000D, name: "ind_chg_ma", type: 1, min: 1, max: 20, def: 5, unit: "mA", flags: 3 },
     { sym: "IND_CHG_SLOW_MS", id: 0x000E, name: "ind_chg_slow_ms", type: 2, min: 600, max: 10000, def: 4000, unit: "ms", flags: 3 },
