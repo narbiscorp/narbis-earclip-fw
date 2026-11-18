@@ -34,7 +34,9 @@ from . import uuids as U
 
 log = logging.getLogger("narbis.client")
 
-DEVICE_NAME = "Narbis Edge Earclip"
+# Prefix of every V2.1 clip name: "Narbis Edge Earclip[ TEST]" and, production
+# firmware v0.4.0+, "Narbis Edge Clip". (The glasses are "Narbis_Edge".)
+DEVICE_NAME = "Narbis Edge "
 
 # Alias so callers can type-annotate discovery results without importing proto.
 KnobInfo = P.KnobRecord

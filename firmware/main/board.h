@@ -34,7 +34,12 @@
  *     with what we have now and move that to production"): open
  *     pairing like a Polar strap, no encryption, any tap on / 0.3 s
  *     hold off, ear-posture standby, red-LED breathing and charge
- *     indicator, no light sleep, wake on USB plug-in. */
+ *     indicator, no light sleep. OFF is the v0.3.0-63 deep sleep
+ *     exactly: button wake only. (A 3 s LP-timer wake to catch a
+ *     charger being plugged in roughly doubled the OFF current, ~40 to
+ *     ~100 uA on the PPK2, 2026-11-18, and was removed.) So the charge
+ *     indicator shows on a clip that is on; an OFF clip on the charger
+ *     stays dark until the button is tapped. */
 #define NARBIS_GATED_PROFILE 0
 
 /* 1 = BENCH build for BARE XIAO modules (pre-soldering): sensor init

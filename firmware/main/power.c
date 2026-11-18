@@ -41,7 +41,6 @@
 #include "ble_iface.h"
 #include "board.h"
 #include "lis2dh12.h"
-#include "power_stub.h"
 
 static const char *TAG = "power";
 
@@ -142,18 +141,6 @@ pwr_boot_cause_t power_boot_cause(void)
     rtc_gpio_deinit(PIN_BUTTON);
 
     if (wc == ESP_SLEEP_WAKEUP_TIMER) {
-        /* The wake stub (rtc_wake_stub_usb.c) re-sleeps every quiet poll;
-         * a timer wake that reaches here says why it continued. */
-        const uint8_t why = power_stub_boot_reason;
-        power_stub_boot_reason = POWER_STUB_BOOT_NONE;
-        ESP_LOGI(TAG, "timer wake after %lu stub polls (reason %u)",
-                 (unsigned long)power_stub_polls, (unsigned)why);
-        if (why == POWER_STUB_BOOT_USB) {
-            return PWR_BOOT_USB;
-        }
-        if (why == POWER_STUB_BOOT_TEST) {
-            return PWR_BOOT_STUBTEST;
-        }
         return PWR_BOOT_TIMER;   /* battery-protection recheck */
     }
     if (wc != ESP_SLEEP_WAKEUP_EXT1) {
@@ -212,30 +199,6 @@ void power_early_wake_capture(void)
 bool power_last_off_battery_forced(void)
 {
     return s_off_batt_forced;
-}
-
-void power_stub_selftest_arm(uint32_t polls)
-{
-    power_stub_test_polls = polls;
-}
-
-/* VUSB as the stub will see it: the pad configured exactly like
- * charger_init() (input, no pulls). Also runs on the ghost / timer
- * paths where charger_init never ran. */
-static bool off_vusb_level(void)
-{
-#if NARBIS_BENCH_BUILD
-    return true;   /* bare module: the divider is on the carrier, pin floats */
-#else
-    const gpio_config_t cfg = {
-        .pin_bit_mask = 1ULL << PIN_VUSB_SENSE,
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-    };
-    gpio_config(&cfg);
-    return gpio_get_level(PIN_VUSB_SENSE) != 0;
-#endif
 }
 
 void power_apply_state(nc_sys_state_t state, bool usb_present)
@@ -343,33 +306,17 @@ void power_enter_off(bool battery_forced)
      * policy, or a battery-forced OFF loses its 12 h recheck forever. */
     s_off_batt_forced = battery_forced;
 
-    /* 6. Wake sources: button low via ext1 (GPIO2 is LP IO 0..7), and
-     *    the LP timer every POWER_STUB_POLL_US for the wake stub, which
-     *    boots only when USB appears (VUSB is not an LP pin, so ext1
-     *    cannot see a charger) or, after a battery-forced OFF, when the
-     *    12 h recheck is due (counted in polls). BENCH builds (bare
-     *    module, VUSB pad floating) keep the old timer-only recheck. */
+    /* 6. Wake sources: button low via ext1 (GPIO2 is LP IO 0..7);
+     *    battery-forced OFF adds a 12 h recheck so a recovering cell is
+     *    noticed (charging cannot wake us — VUSB is not an LP pin). */
     esp_err_t err = esp_sleep_enable_ext1_wakeup_io(1ULL << PIN_BUTTON,
                                                     ESP_EXT1_WAKEUP_ANY_LOW);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "ext1 arm failed: %s", esp_err_to_name(err));
     }
-#if NARBIS_BENCH_BUILD
     if (battery_forced) {
         esp_sleep_enable_timer_wakeup(12ULL * 3600ULL * 1000000ULL);
     }
-#else
-    power_stub_vusb_prev = off_vusb_level();
-    power_stub_recheck_left = battery_forced
-        ? (uint32_t)((12ULL * 3600ULL * 1000000ULL) / POWER_STUB_POLL_US) : 0;
-    power_stub_boot_reason = POWER_STUB_BOOT_NONE;
-    power_stub_polls = 0;
-    esp_set_deep_sleep_wake_stub(&power_wake_stub);
-    esp_sleep_enable_timer_wakeup(POWER_STUB_POLL_US);
-    ESP_LOGI(TAG, "wake: button, or USB plug-in (VUSB now %d)%s",
-             (int)power_stub_vusb_prev,
-             power_stub_test_polls ? " — stub self-test armed" : "");
-#endif
 
     /* 7. */
     esp_deep_sleep_start();

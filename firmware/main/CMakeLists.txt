@@ -19,7 +19,6 @@ idf_component_register(
         main.c
         ota.c
         power.c
-        rtc_wake_stub_usb.c
         selftest_hw.c
         sys_task.c
         test_led_ind.c

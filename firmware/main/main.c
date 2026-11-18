@@ -85,8 +85,6 @@ static const char *boot_cause_str(pwr_boot_cause_t c)
     case PWR_BOOT_BUTTON: return "button";
     case PWR_BOOT_GHOST:  return "ghost";
     case PWR_BOOT_TIMER:  return "timer";
-    case PWR_BOOT_USB:    return "usb";
-    case PWR_BOOT_STUBTEST: return "stubtest";
     default:              return "other";
     }
 }

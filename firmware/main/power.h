@@ -21,19 +21,12 @@ void power_early_wake_capture(void);
  * timer of a battery-forced OFF is never dropped. */
 bool power_last_off_battery_forced(void);
 
-/* Console 'stubtest': the next OFF makes the wake stub re-sleep 'polls'
- * times without booting, then boot (PWR_BOOT_STUBTEST) — a bench check of
- * the stub's sleep loop that needs no cable to be pulled. */
-void power_stub_selftest_arm(uint32_t polls);
-
 typedef enum {
     PWR_BOOT_COLD,        /* power-on / flash                          */
     PWR_BOOT_BUTTON,      /* ext1 wake, press confirmed after debounce */
     PWR_BOOT_GHOST,       /* ext1 wake, button NOT held at recheck —
                              caller should go straight back to sleep   */
     PWR_BOOT_TIMER,       /* RTC timer (battery-protection recheck)    */
-    PWR_BOOT_USB,         /* wake stub saw a charger plugged in        */
-    PWR_BOOT_STUBTEST,    /* console 'stubtest' re-sleep check finished */
     PWR_BOOT_OTHER,
 } pwr_boot_cause_t;
 pwr_boot_cause_t power_boot_cause(void);
